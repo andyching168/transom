@@ -139,6 +139,7 @@ hello          { protocol: u32, vdsSize: Size }         // first message; versio
 windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind,
                  parent?: u64, menuIndex?: u32 }          // parent/menuIndex: transient windows only
 menuBar        { id: u64, items: [{ index: u32, title: String, enabled: bool }] }
+cursor         { id: u64, shape: String }                // pointer shape under the client's pointer
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
 windowTitle    { id: u64, title: String }
@@ -182,6 +183,23 @@ windows"):
   coordinates local to its `rect`. A native menu is tracked by the system against the
   real cursor, so while one is open the host posts its input as real HID input and
   returns the cursor afterwards.
+
+#### Cursor shape
+
+The client draws no pointer of its own; the OS pointer over a proxy window should look
+like what the Mac's would. In background delivery the Mac's real cursor never moves,
+so it cannot be read. Instead the host takes the point of each client `mouseMove`,
+asks the AX tree for the element there (and its ancestors), and guesses the shape from
+their roles: text fields and web text `ibeam`, links `pointingHand`, splitters
+`resizeLeftRight` / `resizeUpDown`, everything else `arrow`. It is a guess from roles,
+not the cursor the app would set.
+
+`cursor { id, shape }` is sent when the shape for window `id` (shared or transient)
+changes; `id` is the window the move was addressed to. `shape` is one of `arrow`,
+`ibeam`, `pointingHand`, `crosshair`, `resizeLeftRight`, `resizeUpDown`, `openHand`,
+`closedHand`, `notAllowed`; a client treats a shape it does not know as `arrow`. Probes
+are rate-limited and coalesced, so the shape can lag the pointer by a few tens of
+milliseconds.
 
 #### Menu bar
 

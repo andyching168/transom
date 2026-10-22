@@ -179,10 +179,10 @@ final class HostAppModel: ObservableObject {
             return
         }
         let pids = apps.map(\.pid)
-        Task.detached(priority: .utility) { [weak self] in
+        Task.detached(priority: .utility) {
             var result: [pid_t: AppWindowSummary] = [:]
             for pid in pids { result[pid] = Self.summary(pid: pid) }
-            await MainActor.run { [result] in self?.summaries = result }
+            await MainActor.run { [result] in HostAppModel.shared.summaries = result }
         }
     }
 

@@ -24,6 +24,18 @@ struct WireProtocolTests {
             .hello(protocolVersion: 1, vdsSize: WireSize(w: 3840, h: 2160)),
             .windowCreated(
                 id: 1, rect: WireRect(x: 0, y: 60, w: 1312, h: 844), title: "Xcode", kind: .normal),
+            .windowCreated(
+                id: 9, rect: WireRect(x: 120, y: 80, w: 200, h: 300), title: "", kind: .menu,
+                parent: 1, menuIndex: 2),
+            .windowCreated(
+                id: 10, rect: WireRect(x: 5, y: 6, w: 70, h: 80), title: "", kind: .popover,
+                parent: 1),
+            .menuBar(
+                id: 1,
+                items: [
+                    WireMenuItem(index: 1, title: "檔案"),
+                    WireMenuItem(index: 2, title: "編輯", enabled: false),
+                ]),
             .windowMoved(id: 1, rect: WireRect(x: 1512, y: 60, w: 1312, h: 844)),
             .windowDestroyed(id: 7),
             .windowTitle(id: 1, title: "main.swift — edited"),
@@ -48,6 +60,7 @@ struct WireProtocolTests {
             .requestFocus(id: 3),
             .requestClose(id: 3),
             .requestKeyframe,
+            .menuPress(id: 1, index: 3),
             .input(id: 7, event: .mouseDown(x: 12, y: 34, button: .left), ts: 1000),
             .input(id: 7, event: .mouseUp(x: 12, y: 34, button: .right), ts: 1001),
             .input(id: 7, event: .mouseMove(x: 640, y: 480), ts: 1002),
@@ -184,5 +197,47 @@ struct WireProtocolTests {
         #expect(
             VideoWire.decode(encoded)
                 == .frame(seq: 12_345, ptsMicros: 9_876_543, keyframe: true, data: payload))
+    }
+}
+
+@Suite("Transient window wire shape")
+struct TransientWireShapeTests {
+    private func json(_ message: ControlMessage) throws -> [String: Any] {
+        let data = try WireCodec.encode(message)
+        return try #require(try JSONSerialization.jsonObject(with: data) as? [String: Any])
+    }
+
+    @Test("a normal window carries no parent or menuIndex, so old clients see the old shape")
+    func normalWindowShape() throws {
+        let object = try json(
+            .windowCreated(id: 1, rect: WireRect(x: 0, y: 0, w: 1, h: 1), title: "t", kind: .normal))
+        #expect(object["parent"] == nil)
+        #expect(object["menuIndex"] == nil)
+        #expect(object["kind"] as? String == "normal")
+    }
+
+    @Test("a menu names its parent and menu-bar item with the documented keys")
+    func menuShape() throws {
+        let object = try json(
+            .windowCreated(
+                id: 9, rect: WireRect(x: 1, y: 2, w: 3, h: 4), title: "", kind: .menu, parent: 1,
+                menuIndex: 2))
+        #expect(object["kind"] as? String == "menu")
+        #expect(object["parent"] as? Int == 1)
+        #expect(object["menuIndex"] as? Int == 2)
+    }
+
+    @Test("menuBar and menuPress use the documented keys")
+    func menuBarShape() throws {
+        let bar = try json(.menuBar(id: 4, items: [WireMenuItem(index: 1, title: "File")]))
+        #expect(bar["type"] as? String == "menuBar")
+        let items = try #require(bar["items"] as? [[String: Any]])
+        #expect(items.first?["title"] as? String == "File")
+        #expect(items.first?["enabled"] as? Bool == true)
+
+        let press = try JSONSerialization.jsonObject(
+            with: try WireCodec.encode(ClientMessage.menuPress(id: 4, index: 1))) as? [String: Any]
+        #expect(press?["type"] as? String == "menuPress")
+        #expect(press?["index"] as? Int == 1)
     }
 }

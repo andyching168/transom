@@ -76,6 +76,15 @@ pub struct TileWindow {
     pub rect: Rect,
 }
 
+/// One top-level menu of an app's menu bar (File, Edit, …). `index` is the host's
+/// handle for `MenuPress`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MenuItem {
+    pub index: u32,
+    pub title: String,
+    pub enabled: bool,
+}
+
 /// Host → client. The full set the host can push (`ControlMessage` in Swift).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
@@ -90,6 +99,16 @@ pub enum ServerMessage {
         rect: Rect,
         title: String,
         kind: WindowKind,
+        /// For a transient window (`kind` is not `Normal`): the window the client
+        /// places it against. Absent for a normal window.
+        parent: Option<u64>,
+        /// For a menu opened from the client's menu strip: that item's index.
+        menu_index: Option<u32>,
+    },
+    /// The top-level menu bar of the app that owns window `id`.
+    MenuBar {
+        id: u64,
+        items: Vec<MenuItem>,
     },
     /// ACTUAL geometry after an AX write or observed move (I-4), never requested.
     WindowMoved {
@@ -134,6 +153,11 @@ pub enum ClientMessage {
     /// Ask the host to emit a fresh intra frame after the decoder dropped stale
     /// compressed frames to stay within the latency budget.
     RequestKeyframe,
+    /// Open (or close, if already open) menu `index` of window `id`'s menu bar.
+    MenuPress {
+        id: u64,
+        index: u32,
+    },
     Input {
         id: u64,
         event: InputEvent,
@@ -230,7 +254,26 @@ impl ServerMessage {
                 rect: rect_field(&v, "rect")?,
                 title: str_field(&v, "title")?,
                 kind: WindowKind::from_wire(field(&v, "kind")?.as_str().unwrap_or("normal")),
+                parent: v.get("parent").and_then(|p| p.as_u64()),
+                menu_index: v.get("menuIndex").and_then(|p| p.as_u32()),
             }),
+            "menuBar" => {
+                let arr = field(&v, "items")?
+                    .as_array()
+                    .ok_or_else(|| DecodeError::Shape("`items` is not an array".to_string()))?;
+                let mut items = Vec::with_capacity(arr.len());
+                for item in arr {
+                    items.push(MenuItem {
+                        index: u32_field(item, "index")?,
+                        title: str_field(item, "title")?,
+                        enabled: item.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
+                    });
+                }
+                Ok(ServerMessage::MenuBar {
+                    id: u64_field(&v, "id")?,
+                    items,
+                })
+            }
             "windowMoved" => Ok(ServerMessage::WindowMoved {
                 id: u64_field(&v, "id")?,
                 rect: rect_field(&v, "rect")?,
@@ -299,6 +342,11 @@ impl ClientMessage {
             ClientMessage::RequestKeyframe => {
                 Value::object(vec![("type", Value::str("requestKeyframe"))])
             }
+            ClientMessage::MenuPress { id, index } => Value::object(vec![
+                ("type", Value::str("menuPress")),
+                ("id", Value::uint(*id)),
+                ("index", Value::uint(*index as u64)),
+            ]),
             ClientMessage::Input { id, event, ts } => Value::object(vec![
                 ("type", Value::str("input")),
                 ("id", Value::uint(*id)),
@@ -372,6 +420,70 @@ mod tests {
             }
             other => panic!("wrong variant: {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_a_menu_with_parent_and_menu_item() {
+        // The exact shape the Swift host emits (WireProtocolTests.menuShape).
+        let msg = ServerMessage::decode(
+            br#"{"type":"windowCreated","id":9,"rect":{"x":1,"y":2,"w":3,"h":4},"title":"","kind":"menu","parent":1,"menuIndex":2}"#,
+        )
+        .unwrap();
+        match msg {
+            ServerMessage::WindowCreated {
+                kind,
+                parent,
+                menu_index,
+                ..
+            } => {
+                assert_eq!(kind, WindowKind::Menu);
+                assert_eq!(parent, Some(1));
+                assert_eq!(menu_index, Some(2));
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_normal_window_has_no_parent() {
+        let msg = ServerMessage::decode(
+            br#"{"type":"windowCreated","id":1,"rect":{"x":0,"y":0,"w":1,"h":1},"title":"t","kind":"normal"}"#,
+        )
+        .unwrap();
+        assert!(matches!(
+            msg,
+            ServerMessage::WindowCreated {
+                parent: None,
+                menu_index: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn decodes_menu_bar_and_encodes_menu_press() {
+        let msg = ServerMessage::decode(
+            r#"{"type":"menuBar","id":4,"items":[{"index":1,"title":"檔案","enabled":true},{"index":2,"title":"編輯","enabled":false},{"index":3,"title":"檢視"}]}"#
+                .as_bytes(),
+        )
+        .unwrap();
+        assert_eq!(
+            msg,
+            ServerMessage::MenuBar {
+                id: 4,
+                items: vec![
+                    MenuItem { index: 1, title: "檔案".into(), enabled: true },
+                    MenuItem { index: 2, title: "編輯".into(), enabled: false },
+                    // `enabled` omitted: an item is enabled unless the host says not.
+                    MenuItem { index: 3, title: "檢視".into(), enabled: true },
+                ]
+            }
+        );
+        let press = ClientMessage::MenuPress { id: 4, index: 2 }.encode();
+        assert_eq!(
+            String::from_utf8(press).unwrap(),
+            r#"{"type":"menuPress","id":4,"index":2}"#
+        );
     }
 
     #[test]

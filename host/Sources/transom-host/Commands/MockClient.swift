@@ -161,7 +161,8 @@ struct MockClient: AsyncParsableCommand {
             switch message {
             case .hello(let version, let vdsSize):
                 print("mock-client: hello protocol=\(version) vds=\(vdsSize.w)x\(vdsSize.h)")
-            case .windowCreated(let id, let rect, let title, _):
+            case .windowCreated(let id, let rect, let title, let kind, _, _):
+                if kind != .normal { continue }
                 windows[id] = rect
                 print("mock-client:   windowCreated id=\(id) \"\(title)\"")
             case .tileLayout(let ws, _):

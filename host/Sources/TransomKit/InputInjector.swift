@@ -71,6 +71,8 @@ public final class InputInjector: @unchecked Sendable {
     private var primaryIDs: [UInt64: CGWindowID] = [:]
     /// The shared window that last took client focus.
     private var focus: (id: UInt64, pid: pid_t)?
+    /// Where the Mac's real cursor was before a menu pulled it away.
+    private var cursorBeforeMenu: CGPoint?
     /// The window of the focused app this injector last made (or found) key.
     private var keyWindowID: CGWindowID?
     /// Apps this injector told they were active, to be told otherwise later.
@@ -116,7 +118,7 @@ public final class InputInjector: @unchecked Sendable {
             inject(id: id, event: event, ts: ts)
         case .requestFocus(let id):
             requestFocus(id: id)
-        case .requestResize, .requestClose, .requestKeyframe:
+        case .requestResize, .requestClose, .requestKeyframe, .menuPress:
             break
         }
     }
@@ -145,6 +147,23 @@ public final class InputInjector: @unchecked Sendable {
             heldButtons.removeAll()
             windowCache = nil
         }
+    }
+
+    /// Put the Mac's cursor back where it was before a menu interaction moved it.
+    /// Called when the last menu closes; a no-op if no menu moved it, and it waits
+    /// while the client still holds a button (the click is not finished).
+    public func returnCursor() {
+        lock.withLock {
+            guard let origin = cursorBeforeMenu, !pointer.isDragging else { return }
+            cursorBeforeMenu = nil
+            CGWarpMouseCursorPosition(origin)
+        }
+    }
+
+    /// The shared window the client last gave focus to (background delivery), the
+    /// fallback parent for a transient window that overlaps nothing.
+    public var focusedWindowID: UInt64? {
+        lock.withLock { focus?.id }
     }
 
     /// True while the client holds a mouse button down. A drag can be moving or
@@ -244,9 +263,19 @@ public final class InputInjector: @unchecked Sendable {
             windowOriginVDS: CGPoint(x: Double(post.rect.x), y: Double(post.rect.y)),
             displayOriginPoints: display.originPoints,
             scale: display.scale)
-        if delivery == .background {
+        // A native menu is tracked by the system against the *real* cursor: events
+        // addressed to the menu's window dismiss it but never pick an item
+        // (measured on the Mac: the click closed the menu, the item's action did
+        // not run; with the real cursor on the item it did). So input for a menu
+        // window is posted as real HID input even in background mode, and the
+        // cursor is handed back once the menu is gone (`returnCursor`).
+        let isMenu = registry.entry(for: id)?.kind == .menu
+        if delivery == .background && !isMenu {
             postBackground(post, point: point, id: id, ts: ts)
             return
+        }
+        if isMenu && delivery == .background && cursorBeforeMenu == nil {
+            cursorBeforeMenu = CGEvent(source: nil)?.location
         }
         let flags = modifiers.flags(using: modifierMap)
 
@@ -380,17 +409,21 @@ public final class InputInjector: @unchecked Sendable {
         case .down(let button):
             label = "mouseDown"
             let windows = windowList(maxAge: 0)
-            guard let element = registry.element(for: id), let pid = pid(of: element),
+            guard let owner = backgroundOwner(id),
                 let hit = receivingWindow(
-                    id: id, element: element, pid: pid, at: point, in: windows)
+                    id: id, element: owner.element, pid: owner.pid, at: point, in: windows)
             else {
                 trace("mouseDown id=\(id): no on-screen window of the app at the point, dropped")
                 return
             }
+            let pid = owner.pid
             // Focus first, so the click lands as a click and not as the one that
-            // merely makes the window key.
-            let focusNote = ensureBackgroundFocus(
-                id: id, element: element, pid: pid, clicked: hit, in: windows)
+            // merely makes the window key. A transient window (menu, popover, input
+            // method) looks after its own key status and has no AX window to ask.
+            let focusNote =
+                owner.element.map {
+                    ensureBackgroundFocus(id: id, element: $0, pid: pid, clicked: hit, in: windows)
+                } ?? ""
             target = BackgroundTarget(pid: pid, windowID: hit.id, origin: hit.bounds.origin)
             eventNumber += 1
             let count = clicks.down(
@@ -540,22 +573,34 @@ public final class InputInjector: @unchecked Sendable {
     /// frontmost window there (an open menu or sheet beats the shared window
     /// under it), else the shared window itself. Assumes `lock` is held.
     private func receivingWindow(
-        id: UInt64, element: AXUIElement, pid: pid_t, at point: CGPoint,
+        id: UInt64, element: AXUIElement?, pid: pid_t, at point: CGPoint,
         in windows: [WindowServerWindow]
     ) -> WindowServerWindow? {
         WindowServerWindows.topmost(at: point, pid: pid, in: windows)
-            ?? primaryWindow(id: id, element: element, pid: pid, in: windows)
+            ?? element.flatMap { primaryWindow(id: id, element: $0, pid: pid, in: windows) }
+    }
+
+    /// Who receives background events for `id`: a shared window's app (with its AX
+    /// window), or the owner of a transient window, which may be an input method
+    /// rather than a shared app. Assumes `lock` is held.
+    private func backgroundOwner(_ id: UInt64) -> (pid: pid_t, element: AXUIElement?)? {
+        if let element = registry.element(for: id), let pid = pid(of: element) {
+            return (pid, element)
+        }
+        if let entry = registry.entry(for: id), entry.kind != .normal, let pid = entry.ownerPID {
+            return (pid, nil)
+        }
+        return nil
     }
 
     /// Assumes `lock` is held.
     private func backgroundTarget(id: UInt64, at point: CGPoint, maxAge: TimeInterval)
         -> BackgroundTarget?
     {
-        guard let element = registry.element(for: id), let pid = pid(of: element) else {
-            return nil
-        }
+        guard let owner = backgroundOwner(id) else { return nil }
+        let pid = owner.pid
         return receivingWindow(
-            id: id, element: element, pid: pid, at: point, in: windowList(maxAge: maxAge)
+            id: id, element: owner.element, pid: pid, at: point, in: windowList(maxAge: maxAge)
         ).map { BackgroundTarget(pid: pid, windowID: $0.id, origin: $0.bounds.origin) }
     }
 

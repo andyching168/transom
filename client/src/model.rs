@@ -13,7 +13,7 @@
 //!  * The host reports **actual** geometry (I-4); the model just stores what it is
 //!    told and never assumes a requested size took effect.
 
-use crate::wire::{Rect, ServerMessage, Size, WindowKind};
+use crate::wire::{MenuItem, Rect, ServerMessage, Size, WindowKind};
 
 /// One managed window. `source` is its crop in the shared texture; its `w`/`h`
 /// are also exactly the pixel size the native proxy window's client area must be,
@@ -24,6 +24,18 @@ pub struct Window {
     pub source: Rect,
     pub title: String,
     pub kind: WindowKind,
+    /// For a transient window: the window it is placed against.
+    pub parent: Option<u64>,
+    /// For a menu opened from the client's menu strip: that item's index.
+    pub menu_index: Option<u32>,
+}
+
+impl Window {
+    /// A menu, popover or input-method list rather than a window of its own: it
+    /// gets no frame, no taskbar entry, and follows its parent.
+    pub fn is_transient(&self) -> bool {
+        self.kind != WindowKind::Normal
+    }
 }
 
 /// A high-level change the platform layer must react to. Derived from the raw
@@ -63,6 +75,11 @@ pub enum ModelEvent {
     Resynced {
         removed: Vec<u64>,
     },
+    /// The menu bar of the app that owns window `id` is now `items`.
+    MenuBarChanged {
+        id: u64,
+        items: Vec<MenuItem>,
+    },
     /// The host sent an `error`. Surfaced for logging; not fatal on its own.
     HostError {
         code: u32,
@@ -77,6 +94,11 @@ pub struct WindowModel {
     vds: Option<Size>,
     windows: Vec<Window>,
     focused: Option<u64>,
+    menu_bars: std::collections::HashMap<u64, Vec<MenuItem>>,
+    /// Transient windows announced since the last `hello`. A `tileLayout` lists
+    /// only normal windows, so this is what tells a live menu from one that
+    /// closed while we were disconnected.
+    announced: Vec<u64>,
 }
 
 impl WindowModel {
@@ -107,6 +129,11 @@ impl WindowModel {
         self.windows.iter().find(|w| w.id == id)
     }
 
+    #[allow(dead_code)]
+    pub fn menu_bar(&self, id: u64) -> Option<&[MenuItem]> {
+        self.menu_bars.get(&id).map(|v| v.as_slice())
+    }
+
     fn index_of(&self, id: u64) -> Option<usize> {
         self.windows.iter().position(|w| w.id == id)
     }
@@ -118,20 +145,35 @@ impl WindowModel {
         match msg {
             ServerMessage::Hello { vds, .. } => {
                 self.vds = Some(vds);
+                self.announced.clear();
                 vec![ModelEvent::Connected { vds }]
+            }
+            ServerMessage::MenuBar { id, items } => {
+                if self.menu_bars.get(&id) == Some(&items) {
+                    return Vec::new();
+                }
+                self.menu_bars.insert(id, items.clone());
+                vec![ModelEvent::MenuBarChanged { id, items }]
             }
             ServerMessage::WindowCreated {
                 id,
                 rect,
                 title,
                 kind,
+                parent,
+                menu_index,
             } => {
                 let window = Window {
                     id,
                     source: rect,
                     title: title.clone(),
                     kind,
+                    parent,
+                    menu_index,
                 };
+                if kind != WindowKind::Normal && !self.announced.contains(&id) {
+                    self.announced.push(id);
+                }
                 // A create for an id we already track is treated as an update, so a
                 // duplicate resync `windowCreated` is idempotent rather than a
                 // second proxy.
@@ -183,6 +225,8 @@ impl WindowModel {
                 vec![ModelEvent::WindowFocused { id }]
             }
             ServerMessage::WindowDestroyed { id } => {
+                self.menu_bars.remove(&id);
+                self.announced.retain(|a| *a != id);
                 if let Some(i) = self.index_of(id) {
                     self.windows.remove(i);
                     if self.focused == Some(id) {
@@ -218,6 +262,8 @@ impl WindowModel {
                             source: tw.rect,
                             title: String::new(),
                             kind: WindowKind::Normal,
+                            parent: None,
+                            menu_index: None,
                         };
                         self.windows.push(window.clone());
                         events.push(ModelEvent::WindowAdded(window));
@@ -226,9 +272,12 @@ impl WindowModel {
                 // Drop any window not present in the layout (it died while we were
                 // away, or the host reorganized). Prune and report.
                 let live: Vec<u64> = windows.iter().map(|w| w.id).collect();
+                let announced = self.announced.clone();
                 let mut removed = Vec::new();
                 self.windows.retain(|w| {
-                    if live.contains(&w.id) {
+                    // The layout lists normal windows only; a transient window is
+                    // alive if the host announced it on this connection.
+                    if live.contains(&w.id) || (w.is_transient() && announced.contains(&w.id)) {
                         true
                     } else {
                         removed.push(w.id);
@@ -267,6 +316,8 @@ mod tests {
             rect: r,
             title: title.to_string(),
             kind: WindowKind::Normal,
+            parent: None,
+            menu_index: None,
         }
     }
 
@@ -423,5 +474,75 @@ mod tests {
             .iter()
             .any(|e| matches!(e, ModelEvent::WindowAdded(w) if w.id == 5)));
         assert_eq!(m.get(5).unwrap().source, rect(0, 0, 30, 30));
+    }
+
+    fn menu(id: u64, parent: Option<u64>, menu_index: Option<u32>) -> ServerMessage {
+        ServerMessage::WindowCreated {
+            id,
+            rect: rect(100, 20, 200, 300),
+            title: String::new(),
+            kind: WindowKind::Menu,
+            parent,
+            menu_index,
+        }
+    }
+
+    #[test]
+    fn transient_window_keeps_its_parent_and_menu_item() {
+        let mut m = WindowModel::new();
+        m.apply(created(1, rect(0, 100, 800, 600), "Word"));
+        let ev = m.apply(menu(9, Some(1), Some(2)));
+        assert!(ev.iter().any(|e| matches!(e,
+            ModelEvent::WindowAdded(w) if w.id == 9 && w.parent == Some(1) && w.menu_index == Some(2) && w.is_transient())));
+        assert!(!m.get(1).unwrap().is_transient());
+    }
+
+    #[test]
+    fn tile_layout_does_not_prune_a_menu_announced_on_this_connection() {
+        // The host lists only normal windows in `tileLayout`, after the menus.
+        let mut m = WindowModel::new();
+        m.apply(ServerMessage::Hello { protocol: 1, vds: Size { w: 100, h: 100 } });
+        m.apply(created(1, rect(0, 0, 10, 10), "A"));
+        m.apply(menu(9, Some(1), None));
+        let ev = m.apply(ServerMessage::TileLayout {
+            windows: vec![TileWindow { id: 1, rect: rect(0, 0, 10, 10) }],
+            display: Size { w: 100, h: 100 },
+        });
+        assert!(m.get(9).is_some());
+        assert!(!ev.iter().any(|e| matches!(e, ModelEvent::Resynced { .. })));
+    }
+
+    #[test]
+    fn a_menu_that_closed_while_disconnected_is_pruned_at_the_next_resync() {
+        let mut m = WindowModel::new();
+        m.apply(ServerMessage::Hello { protocol: 1, vds: Size { w: 100, h: 100 } });
+        m.apply(created(1, rect(0, 0, 10, 10), "A"));
+        m.apply(menu(9, Some(1), None));
+        // Reconnect: the new hello, then a resync that no longer mentions window 9.
+        m.apply(ServerMessage::Hello { protocol: 1, vds: Size { w: 100, h: 100 } });
+        m.apply(created(1, rect(0, 0, 10, 10), "A"));
+        let ev = m.apply(ServerMessage::TileLayout {
+            windows: vec![TileWindow { id: 1, rect: rect(0, 0, 10, 10) }],
+            display: Size { w: 100, h: 100 },
+        });
+        assert!(ev.contains(&ModelEvent::Resynced { removed: vec![9] }));
+        assert!(m.get(9).is_none());
+    }
+
+    #[test]
+    fn menu_bar_is_stored_reported_once_and_dropped_with_its_window() {
+        let items = vec![
+            MenuItem { index: 1, title: "檔案".into(), enabled: true },
+            MenuItem { index: 2, title: "編輯".into(), enabled: false },
+        ];
+        let mut m = WindowModel::new();
+        m.apply(created(1, rect(0, 0, 10, 10), "A"));
+        let ev = m.apply(ServerMessage::MenuBar { id: 1, items: items.clone() });
+        assert_eq!(ev, vec![ModelEvent::MenuBarChanged { id: 1, items: items.clone() }]);
+        assert_eq!(m.menu_bar(1), Some(items.as_slice()));
+        // An identical resend (every resync) is not a change.
+        assert!(m.apply(ServerMessage::MenuBar { id: 1, items }).is_empty());
+        m.apply(ServerMessage::WindowDestroyed { id: 1 });
+        assert!(m.menu_bar(1).is_none());
     }
 }

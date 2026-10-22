@@ -134,6 +134,18 @@ public actor ControlServer {
                 try WireCodec.encode(
                     .windowCreated(
                         id: entry.id, rect: entry.rect, title: entry.title, kind: .normal)))
+            if let items = registry.menuBar(for: entry.id) {
+                try await transport.send(try WireCodec.encode(.menuBar(id: entry.id, items: items)))
+            }
+        }
+        // Transient windows follow their parents, and stay out of the tile layout:
+        // the client would otherwise adopt a menu as a normal window.
+        for entry in registry.auxSnapshot() {
+            try await transport.send(
+                try WireCodec.encode(
+                    .windowCreated(
+                        id: entry.id, rect: entry.rect, title: entry.title, kind: entry.kind,
+                        parent: entry.parent, menuIndex: entry.menuIndex)))
         }
         let windows = entries.map { WireWindow(id: $0.id, rect: $0.rect) }
         try await transport.send(
@@ -154,6 +166,11 @@ public actor ControlServer {
             return .windowTitle(id: id, title: title)
         case .focused(let id):
             return .windowFocused(id: id)
+        case .auxCreated(let id, let rect, let kind, let parent, let menuIndex):
+            return .windowCreated(
+                id: id, rect: rect, title: "", kind: kind, parent: parent, menuIndex: menuIndex)
+        case .menuBar(let id, let items):
+            return .menuBar(id: id, items: items)
         }
     }
 }

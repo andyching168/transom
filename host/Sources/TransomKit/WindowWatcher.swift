@@ -28,6 +28,12 @@ public final class WindowWatcher: @unchecked Sendable {
         case titleChanged(id: UInt64, title: String)
         case focused(id: UInt64)
         case sharingFailed(message: String)
+        /// A menu, popover or input-method window appeared (`AuxWindowTracker`).
+        /// Its later moves and its destruction reuse `.moved` / `.destroyed`.
+        case auxCreated(
+            id: UInt64, rect: WireRect, kind: WindowKind, parent: UInt64?, menuIndex: UInt32?)
+        /// The menu bar of the app that owns window `id` changed (`MenuBarService`).
+        case menuBar(id: UInt64, items: [WireMenuItem])
     }
 
     /// Called before a newly created/restored standard window enters the stream.
@@ -213,7 +219,7 @@ public final class WindowWatcher: @unchecked Sendable {
         offDisplaySince[id] = nil
         let previous = registry.entry(for: id)
         tracked[id] = element
-        registry.record(id: id, rect: r, title: title)
+        registry.record(id: id, rect: r, title: title, ownerPID: pid)
         if let previous {
             if previous.rect != r { emit(.moved(id: id, rect: r)) }
             if previous.title != title { emit(.titleChanged(id: id, title: title)) }

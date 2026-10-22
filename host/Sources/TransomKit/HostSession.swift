@@ -189,6 +189,8 @@ public final class HostSession: @unchecked Sendable {
     private var eventSink: AsyncStream<WindowWatcher.WindowEvent>.Continuation?
     private var clientSink: AsyncStream<ClientMessage>.Continuation?
     private var injector: InputInjector?
+    private var auxTracker: AuxWindowTracker?
+    private var menuBar: MenuBarService?
     private var tasks: [Task<Void, Never>] = []
 
     // Everything a background callback writes lives behind this lock.
@@ -371,6 +373,25 @@ public final class HostSession: @unchecked Sendable {
         let (clientMessages, clientSink) = AsyncStream.makeStream(of: ClientMessage.self)
         self.clientSink = clientSink
 
+        // Menus, popovers and input-method candidate lists are windows of their
+        // own that the AX watcher never sees. They are mirrored to the client as
+        // transient windows, and the menu bar (which is not in the capture at all)
+        // travels as structured data. See AuxWindows.swift / MenuBarService.swift.
+        let sharedPIDs = Set(targets.map(\.pid))
+        let menuBar = MenuBarService(registry: registry, emit: { event in eventSink.yield(event) })
+        self.menuBar = menuBar
+        let auxTracker = AuxWindowTracker(
+            display: disp, registry: registry, sharedPIDs: sharedPIDs,
+            emit: { event in eventSink.yield(event) })
+        auxTracker.recentPress = { [weak menuBar] pid in menuBar?.recentPress(pid: pid) }
+        auxTracker.consumePress = { [weak menuBar] pid in menuBar?.consumePress(pid: pid) }
+        auxTracker.onMenusClosed = { [weak injector] in injector?.returnCursor() }
+        auxTracker.focusedWindow = { [weak injector] in injector?.focusedWindowID }
+        auxTracker.onInputMethodPIDsChanged = { [weak self] pids in
+            Task { await self?.capture?.setAdditionalApplicationPIDs(pids) }
+        }
+        self.auxTracker = auxTracker
+
         let controlServer = ControlServer(vdsSize: vdsSize, registry: registry)
         self.controlServer = controlServer
         await controlServer.setOnClientMessage { message in clientSink.yield(message) }
@@ -456,6 +477,11 @@ public final class HostSession: @unchecked Sendable {
                         injector.handle(message)
                     case let .requestClose(id):
                         injector.close(id: id)
+                    case let .menuPress(id, index):
+                        let outcome = menuBar.press(id: id, index: index)
+                        if case .failed(let reason) = outcome {
+                            Log.ax.notice("menuPress id=\(id, privacy: .public) \(index, privacy: .public): \(reason, privacy: .public)")
+                        }
                     case .requestKeyframe:
                         // A client may deliberately drop stale compressed frames
                         // to protect interaction latency. Restart its dependency
@@ -469,6 +495,20 @@ public final class HostSession: @unchecked Sendable {
                 while !Task.isCancelled {
                     try? await Task.sleep(nanoseconds: 50_000_000)
                     await resize.tick()
+                }
+            })
+        tasks.append(
+            Task.detached(priority: .userInitiated) {
+                while !Task.isCancelled {
+                    auxTracker.poll()
+                    try? await Task.sleep(nanoseconds: 40_000_000)
+                }
+            })
+        tasks.append(
+            Task.detached(priority: .utility) {
+                while !Task.isCancelled {
+                    menuBar.refresh()
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
                 }
             })
         try await controlListener.start()
@@ -527,6 +567,12 @@ public final class HostSession: @unchecked Sendable {
             self?.markEncodeStart()
             try? enc.encode(pixelBuffer, pts: pts, duration: frameDuration)
         }
+        // The capture is filtered to the shared apps; an input method's candidate
+        // list belongs to another process, so it is added before the first frame
+        // (and kept current by the tracker) rather than after it first shows up.
+        if let auxTracker {
+            await cap.setAdditionalApplicationPIDs(auxTracker.refreshInputMethods(force: true))
+        }
         try await cap.start()
 
         try await listener.start()
@@ -570,6 +616,9 @@ public final class HostSession: @unchecked Sendable {
         eventSink = nil
         clientSink = nil
         injector = nil
+        auxTracker?.reset()
+        auxTracker = nil
+        menuBar = nil
 
         statsLock.withLock {
             isRunning = false

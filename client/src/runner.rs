@@ -186,6 +186,8 @@ fn apply_for_display(
 ) {
     match ev {
         ModelEvent::Connected { vds: size } => *vds = Some(*size),
+        // Menus and popovers are not windows a test action can target.
+        ModelEvent::WindowAdded(w) if w.is_transient() => {}
         ModelEvent::WindowAdded(w) => {
             if !order.contains(&w.id) {
                 order.push(w.id);
@@ -222,8 +224,27 @@ fn print_control(ev: &ModelEvent, t: u64) {
             println!("[{t:>6}ms] connected — VDS {}x{}", vds.w, vds.h)
         }
         ModelEvent::WindowAdded(w) => println!(
-            "[{t:>6}ms] + window {} \"{}\" {:?} source ({},{}) {}x{}",
-            w.id, w.title, w.kind, w.source.x, w.source.y, w.source.w, w.source.h
+            "[{t:>6}ms] + window {} \"{}\" {:?} source ({},{}) {}x{}{}",
+            w.id,
+            w.title,
+            w.kind,
+            w.source.x,
+            w.source.y,
+            w.source.w,
+            w.source.h,
+            match (w.parent, w.menu_index) {
+                (Some(p), Some(i)) => format!(" parent {p} menu-item {i}"),
+                (Some(p), None) => format!(" parent {p}"),
+                _ => String::new(),
+            }
+        ),
+        ModelEvent::MenuBarChanged { id, items } => println!(
+            "[{t:>6}ms] menu bar of window {id}: {}",
+            items
+                .iter()
+                .map(|i| format!("[{}] {}", i.index, i.title))
+                .collect::<Vec<_>>()
+                .join("  ")
         ),
         ModelEvent::WindowRectChanged {
             id,

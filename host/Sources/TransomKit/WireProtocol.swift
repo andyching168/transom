@@ -58,6 +58,20 @@ public enum WindowKind: String, Codable, Sendable {
     case popover
 }
 
+/// One top-level entry of an app's menu bar (File, Edit, View, …), as the client
+/// draws it. `index` is the host's handle for `menuPress`; titles are the app's own
+/// localized strings.
+public struct WireMenuItem: Codable, Equatable, Sendable {
+    public var index: UInt32
+    public var title: String
+    public var enabled: Bool
+    public init(index: UInt32, title: String, enabled: Bool = true) {
+        self.index = index
+        self.title = title
+        self.enabled = enabled
+    }
+}
+
 /// Maps to the client's `WM_ENTERSIZEMOVE` / `WM_SIZING` / `WM_EXITSIZEMOVE`
 /// (protocol.md §5). The host throttles `live` and treats `end` as the
 /// authoritative 1:1 snap.
@@ -76,13 +90,21 @@ public enum ControlMessage: Sendable, Equatable {
     /// First message on a fresh control connection: version + the full virtual
     /// display size, so the client can sanity-check every rect it receives.
     case hello(protocolVersion: Int, vdsSize: WireSize)
-    case windowCreated(id: UInt64, rect: WireRect, title: String, kind: WindowKind)
+    /// `parent` and `menuIndex` are only sent for transient windows (`kind` is not
+    /// `.normal`): `parent` is the shared window the client should place it
+    /// against, and `menuIndex` says the menu was opened from that menu-bar item.
+    case windowCreated(
+        id: UInt64, rect: WireRect, title: String, kind: WindowKind,
+        parent: UInt64? = nil, menuIndex: UInt32? = nil)
     /// ACTUAL geometry after an AX write or an observed move (I-4), never requested.
     case windowMoved(id: UInt64, rect: WireRect)
     case windowDestroyed(id: UInt64)
     case windowTitle(id: UInt64, title: String)
     case windowFocused(id: UInt64)
     case tileLayout(windows: [WireWindow], displaySize: WireSize)
+    /// The top-level menu bar of the app that owns window `id`. Sent when it first
+    /// becomes known and whenever its titles or enabled state change.
+    case menuBar(id: UInt64, items: [WireMenuItem])
     case error(code: UInt32, message: String)
 }
 
@@ -94,6 +116,9 @@ public enum ClientMessage: Sendable, Equatable {
     case requestClose(id: UInt64)
     /// The client dropped stale compressed frames and needs a new intra frame.
     case requestKeyframe
+    /// Open (or close, if it is already open) menu `index` of the menu bar last
+    /// reported for window `id`. The menu itself arrives as a `menu` window.
+    case menuPress(id: UInt64, index: UInt32)
     /// A click/type/scroll targeted at window `id` (issue #7). `event` carries
     /// window-local physical pixels / Windows VK codes (see `InputEvent`); `ts` is
     /// the client's monotonic timestamp in milliseconds, opaque to the host in v1.
@@ -104,7 +129,7 @@ public enum ClientMessage: Sendable, Equatable {
 
 extension ControlMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, rect, title, kind, windows, displaySize
+        case type, id, rect, title, kind, windows, displaySize, parent, menuIndex, items
         case protocolVersion = "protocol"
         case vdsSize, code, message
     }
@@ -116,12 +141,18 @@ extension ControlMessage: Codable {
             try c.encode("hello", forKey: .type)
             try c.encode(version, forKey: .protocolVersion)
             try c.encode(vdsSize, forKey: .vdsSize)
-        case .windowCreated(let id, let rect, let title, let kind):
+        case .windowCreated(let id, let rect, let title, let kind, let parent, let menuIndex):
             try c.encode("windowCreated", forKey: .type)
             try c.encode(id, forKey: .id)
             try c.encode(rect, forKey: .rect)
             try c.encode(title, forKey: .title)
             try c.encode(kind, forKey: .kind)
+            try c.encodeIfPresent(parent, forKey: .parent)
+            try c.encodeIfPresent(menuIndex, forKey: .menuIndex)
+        case .menuBar(let id, let items):
+            try c.encode("menuBar", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(items, forKey: .items)
         case .windowMoved(let id, let rect):
             try c.encode("windowMoved", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -160,7 +191,13 @@ extension ControlMessage: Codable {
                 id: try c.decode(UInt64.self, forKey: .id),
                 rect: try c.decode(WireRect.self, forKey: .rect),
                 title: try c.decode(String.self, forKey: .title),
-                kind: try c.decode(WindowKind.self, forKey: .kind))
+                kind: try c.decode(WindowKind.self, forKey: .kind),
+                parent: try c.decodeIfPresent(UInt64.self, forKey: .parent),
+                menuIndex: try c.decodeIfPresent(UInt32.self, forKey: .menuIndex))
+        case "menuBar":
+            self = .menuBar(
+                id: try c.decode(UInt64.self, forKey: .id),
+                items: try c.decode([WireMenuItem].self, forKey: .items))
         case "windowMoved":
             self = .windowMoved(
                 id: try c.decode(UInt64.self, forKey: .id),
@@ -190,7 +227,7 @@ extension ControlMessage: Codable {
 
 extension ClientMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, size, phase, event, ts
+        case type, id, size, phase, event, ts, index
     }
 
     public func encode(to encoder: Encoder) throws {
@@ -209,6 +246,10 @@ extension ClientMessage: Codable {
             try c.encode(id, forKey: .id)
         case .requestKeyframe:
             try c.encode("requestKeyframe", forKey: .type)
+        case .menuPress(let id, let index):
+            try c.encode("menuPress", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(index, forKey: .index)
         case .input(let id, let event, let ts):
             try c.encode("input", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -232,6 +273,10 @@ extension ClientMessage: Codable {
             self = .requestClose(id: try c.decode(UInt64.self, forKey: .id))
         case "requestKeyframe":
             self = .requestKeyframe
+        case "menuPress":
+            self = .menuPress(
+                id: try c.decode(UInt64.self, forKey: .id),
+                index: try c.decode(UInt32.self, forKey: .index))
         case "input":
             self = .input(
                 id: try c.decode(UInt64.self, forKey: .id),

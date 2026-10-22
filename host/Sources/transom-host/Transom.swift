@@ -32,6 +32,7 @@ struct Transom: AsyncParsableCommand {
             Capture.self,
             Probe.self,
             MenuWatch.self,
+            Aux.self,
             EncodeProbe.self,
             Encode.self,
             Serve.self,

@@ -97,6 +97,11 @@ public final class InputInjector: @unchecked Sendable {
     /// otherwise the same detail still goes to `Log.input`.
     public var onTrace: (@Sendable (String) -> Void)?
 
+    /// Called for each pointer move posted to window `id`, with the point in AX
+    /// global points. `CursorService` uses it to judge the pointer shape; it must
+    /// return quickly, since it runs under the injector's lock.
+    public var onPointerMove: (@Sendable (UInt64, CGPoint) -> Void)?
+
     public init(
         display: DisplayInfo, registry: WindowRegistry, modifierMap: ModifierMap = .swap,
         delivery: InputDelivery = .background
@@ -263,6 +268,7 @@ public final class InputInjector: @unchecked Sendable {
             windowOriginVDS: CGPoint(x: Double(post.rect.x), y: Double(post.rect.y)),
             displayOriginPoints: display.originPoints,
             scale: display.scale)
+        if case .move = post.kind { onPointerMove?(id, point) }
         // A native menu is tracked by the system against the *real* cursor: events
         // addressed to the menu's window dismiss it but never pick an item
         // (measured on the Mac: the click closed the menu, the item's action did

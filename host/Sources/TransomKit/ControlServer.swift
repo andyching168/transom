@@ -171,6 +171,8 @@ public actor ControlServer {
                 id: id, rect: rect, title: "", kind: kind, parent: parent, menuIndex: menuIndex)
         case .menuBar(let id, let items):
             return .menuBar(id: id, items: items)
+        case .cursor(let id, let shape):
+            return .cursor(id: id, shape: shape)
         }
     }
 }

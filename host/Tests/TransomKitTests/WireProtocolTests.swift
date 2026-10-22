@@ -36,6 +36,7 @@ struct WireProtocolTests {
                     WireMenuItem(index: 1, title: "檔案", x: 106),
                     WireMenuItem(index: 2, title: "編輯", enabled: false),
                 ]),
+            .cursor(id: 1, shape: .ibeam),
             .windowMoved(id: 1, rect: WireRect(x: 1512, y: 60, w: 1312, h: 844)),
             .windowDestroyed(id: 7),
             .windowTitle(id: 1, title: "main.swift — edited"),
@@ -225,6 +226,14 @@ struct TransientWireShapeTests {
         #expect(object["kind"] as? String == "menu")
         #expect(object["parent"] as? Int == 1)
         #expect(object["menuIndex"] as? Int == 2)
+    }
+
+    @Test("cursor uses the documented keys")
+    func cursorShape() throws {
+        let object = try json(.cursor(id: 3, shape: .pointingHand))
+        #expect(object["type"] as? String == "cursor")
+        #expect(object["id"] as? Int == 3)
+        #expect(object["shape"] as? String == "pointingHand")
     }
 
     @Test("menuBar and menuPress use the documented keys")

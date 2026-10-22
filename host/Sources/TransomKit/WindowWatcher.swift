@@ -34,6 +34,8 @@ public final class WindowWatcher: @unchecked Sendable {
             id: UInt64, rect: WireRect, kind: WindowKind, parent: UInt64?, menuIndex: UInt32?)
         /// The menu bar of the app that owns window `id` changed (`MenuBarService`).
         case menuBar(id: UInt64, items: [WireMenuItem])
+        /// The pointer shape under the client's pointer changed (`CursorService`).
+        case cursor(id: UInt64, shape: CursorShape)
     }
 
     /// Called before a newly created/restored standard window enters the stream.

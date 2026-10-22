@@ -191,6 +191,7 @@ public final class HostSession: @unchecked Sendable {
     private var injector: InputInjector?
     private var auxTracker: AuxWindowTracker?
     private var menuBar: MenuBarService?
+    private var cursorService: CursorService?
     private var tasks: [Task<Void, Never>] = []
 
     // Everything a background callback writes lives behind this lock.
@@ -380,6 +381,13 @@ public final class HostSession: @unchecked Sendable {
         let sharedPIDs = Set(targets.map(\.pid))
         let menuBar = MenuBarService(registry: registry, display: disp, emit: { event in eventSink.yield(event) })
         self.menuBar = menuBar
+        // The Mac's pointer shape under the client's pointer, judged from the AX
+        // tree because background delivery never moves the real cursor.
+        let cursorService = CursorService(registry: registry, emit: { event in eventSink.yield(event) })
+        injector.onPointerMove = { [weak cursorService] id, point in
+            cursorService?.pointerMoved(id: id, at: point)
+        }
+        self.cursorService = cursorService
         let auxTracker = AuxWindowTracker(
             display: disp, registry: registry, sharedPIDs: sharedPIDs,
             emit: { event in eventSink.yield(event) })
@@ -400,6 +408,7 @@ public final class HostSession: @unchecked Sendable {
             // A dropped client leaves no modifier or button held for the next one
             // (issue #7), and no shared app still believing it is the active one.
             if !connected {
+                cursorService.reset()
                 injector.reset()
                 injector.releaseFocus()
             }
@@ -624,6 +633,7 @@ public final class HostSession: @unchecked Sendable {
         eventSink = nil
         clientSink = nil
         injector = nil
+        cursorService = nil
         auxTracker?.reset()
         auxTracker = nil
         menuBar = nil

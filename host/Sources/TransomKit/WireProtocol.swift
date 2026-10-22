@@ -91,6 +91,21 @@ public let transomProtocolVersion = 1
 
 // MARK: - Host -> Client
 
+/// The Mac's pointer shape over a window, as the host judged it from the
+/// accessibility tree (`CursorService`). The raw value is the wire string; a
+/// client treats one it does not know as the arrow.
+public enum CursorShape: String, Codable, Sendable, Equatable {
+    case arrow
+    case ibeam
+    case pointingHand
+    case crosshair
+    case resizeLeftRight
+    case resizeUpDown
+    case openHand
+    case closedHand
+    case notAllowed
+}
+
 public enum ControlMessage: Sendable, Equatable {
     /// First message on a fresh control connection: version + the full virtual
     /// display size, so the client can sanity-check every rect it receives.
@@ -110,6 +125,9 @@ public enum ControlMessage: Sendable, Equatable {
     /// The top-level menu bar of the app that owns window `id`. Sent when it first
     /// becomes known and whenever its titles or enabled state change.
     case menuBar(id: UInt64, items: [WireMenuItem])
+    /// What the pointer looks like over window `id` (shared or transient). Sent
+    /// when the shape under the client's pointer changes.
+    case cursor(id: UInt64, shape: CursorShape)
     case error(code: UInt32, message: String)
 }
 
@@ -134,7 +152,7 @@ public enum ClientMessage: Sendable, Equatable {
 
 extension ControlMessage: Codable {
     private enum Key: String, CodingKey {
-        case type, id, rect, title, kind, windows, displaySize, parent, menuIndex, items
+        case type, id, rect, title, kind, windows, displaySize, parent, menuIndex, items, shape
         case protocolVersion = "protocol"
         case vdsSize, code, message
     }
@@ -158,6 +176,10 @@ extension ControlMessage: Codable {
             try c.encode("menuBar", forKey: .type)
             try c.encode(id, forKey: .id)
             try c.encode(items, forKey: .items)
+        case .cursor(let id, let shape):
+            try c.encode("cursor", forKey: .type)
+            try c.encode(id, forKey: .id)
+            try c.encode(shape, forKey: .shape)
         case .windowMoved(let id, let rect):
             try c.encode("windowMoved", forKey: .type)
             try c.encode(id, forKey: .id)
@@ -203,6 +225,10 @@ extension ControlMessage: Codable {
             self = .menuBar(
                 id: try c.decode(UInt64.self, forKey: .id),
                 items: try c.decode([WireMenuItem].self, forKey: .items))
+        case "cursor":
+            self = .cursor(
+                id: try c.decode(UInt64.self, forKey: .id),
+                shape: try c.decode(CursorShape.self, forKey: .shape))
         case "windowMoved":
             self = .windowMoved(
                 id: try c.decode(UInt64.self, forKey: .id),

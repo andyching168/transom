@@ -15,10 +15,12 @@ public struct WindowServerWindow: Sendable, Equatable {
     public let alpha: Double
     /// `kCGWindowName`. Only present with Screen Recording permission.
     public let title: String?
+    /// `kCGWindowOwnerName`, for diagnostics.
+    public let ownerName: String?
 
     public init(
         id: CGWindowID, pid: pid_t, layer: Int, bounds: CGRect, alpha: Double = 1,
-        title: String? = nil
+        title: String? = nil, ownerName: String? = nil
     ) {
         self.id = id
         self.pid = pid
@@ -26,6 +28,7 @@ public struct WindowServerWindow: Sendable, Equatable {
         self.bounds = bounds
         self.alpha = alpha
         self.title = title
+        self.ownerName = ownerName
     }
 }
 
@@ -59,7 +62,8 @@ public enum WindowServerWindows {
                 layer: info[kCGWindowLayer as String] as? Int ?? 0,
                 bounds: bounds,
                 alpha: info[kCGWindowAlpha as String] as? Double ?? 1,
-                title: info[kCGWindowName as String] as? String)
+                title: info[kCGWindowName as String] as? String,
+                ownerName: info[kCGWindowOwnerName as String] as? String)
         }
     }
 

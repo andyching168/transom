@@ -39,6 +39,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
     private let lock = NSLock()
     private var stream: SCStream?
+    private var extraPIDs: Set<pid_t> = []
+    private var filterUpdateRunning = false
     private var latestPixelBuffer: CVPixelBuffer?
     private var _stats: FrameStats?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -87,7 +89,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         if let applicationPIDs {
             // Inclusion, not exclusion: other apps, the desktop and this host's
             // own panel must never appear inside a selected window's crop.
-            let applications = content.applications.filter { applicationPIDs.contains($0.processID) }
+            let wanted = applicationPIDs.union(lock.withLock { extraPIDs })
+            let applications = content.applications.filter { wanted.contains($0.processID) }
             guard !applications.isEmpty else { throw CaptureError.noSelectedApplications }
             filter = SCContentFilter(display: scDisplay, including: applications, exceptingWindows: [])
         } else {
@@ -118,6 +121,53 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         lock.withLock { self.stream = stream }
+    }
+
+    /// Also capture the windows of these processes (input methods, whose
+    /// candidate lists are drawn by their own process and so are not part of the
+    /// selected apps). Applies to a running stream without restarting it, and is a
+    /// no-op for a whole-display capture, which already sees everything.
+    public func setAdditionalApplicationPIDs(_ pids: Set<pid_t>) async {
+        guard applicationPIDs != nil else { return }
+        let shouldRun: Bool = lock.withLock {
+            guard extraPIDs != pids else { return false }
+            extraPIDs = pids
+            // One updater at a time; it re-reads `extraPIDs` until it settles.
+            if filterUpdateRunning { return false }
+            filterUpdateRunning = true
+            return true
+        }
+        guard shouldRun else { return }
+        while true {
+            let (target, stream) = lock.withLock { (extraPIDs, self.stream) }
+            if let stream, let base = applicationPIDs,
+                let content = try? await SCShareableContent.excludingDesktopWindows(
+                    false, onScreenWindowsOnly: false),
+                let scDisplay = content.displays.first(where: { $0.displayID == display.id })
+            {
+                let wanted = base.union(target)
+                let applications = content.applications.filter { wanted.contains($0.processID) }
+                if !applications.isEmpty {
+                    let filter = SCContentFilter(
+                        display: scDisplay, including: applications, exceptingWindows: [])
+                    do {
+                        try await stream.updateContentFilter(filter)
+                        Log.capture.notice(
+                            "capture: filter now includes \(applications.count, privacy: .public) apps (\(target.count, privacy: .public) input method)"
+                        )
+                    } catch {
+                        Log.capture.error(
+                            "capture: updateContentFilter failed: \(error.localizedDescription, privacy: .public)"
+                        )
+                    }
+                }
+            }
+            let done: Bool = lock.withLock {
+                if extraPIDs == target { filterUpdateRunning = false; return true }
+                return false
+            }
+            if done { return }
+        }
     }
 
     public func stop() async {

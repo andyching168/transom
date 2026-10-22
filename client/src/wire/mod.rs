@@ -19,7 +19,8 @@ pub mod video;
 // build they read as unused even though they are not.
 #[allow(unused_imports)]
 pub use control::{
-    ClientMessage, DecodeError, Rect, ResizePhase, ServerMessage, Size, TileWindow, WindowKind,
+    ClientMessage, DecodeError, MenuItem, Rect, ResizePhase, ServerMessage, Size, TileWindow,
+    WindowKind,
 };
 #[allow(unused_imports)]
 pub use frame::{frame, FrameError, FrameReader};

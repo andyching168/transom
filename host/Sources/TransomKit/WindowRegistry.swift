@@ -1,4 +1,5 @@
 import ApplicationServices
+import CoreGraphics
 import Foundation
 
 /// Mints and owns the opaque `u64` window identity the wire uses (protocol.md §3),
@@ -17,6 +18,18 @@ public final class WindowRegistry: @unchecked Sendable {
         public let id: UInt64
         public var rect: WireRect
         public var title: String
+        /// `.normal` for a shared AX window; anything else is a transient window
+        /// (menu, popover, input-method candidate list) the host tracks through
+        /// the WindowServer instead of AX (`AuxWindowTracker`).
+        public var kind: WindowKind = .normal
+        /// For a transient window: the shared window it is placed against.
+        public var parent: UInt64?
+        /// For a transient window opened from a menu-bar item: that item's index.
+        public var menuIndex: UInt32?
+        /// The process that owns the window. Known for every transient window (it
+        /// is the receiver of a click on it, and for an input method it is not a
+        /// shared app) and for shared windows once the watcher records it.
+        public var ownerPID: pid_t?
     }
 
     /// `AXUIElement` is a CF type; wrap it so it is a dictionary key via
@@ -32,6 +45,8 @@ public final class WindowRegistry: @unchecked Sendable {
     private var idByElement: [ElementKey: UInt64] = [:]
     private var elementByID: [UInt64: AXUIElement] = [:]
     private var entries: [UInt64: Entry] = [:]
+    private var idByAuxWindow: [CGWindowID: UInt64] = [:]
+    private var menuBars: [UInt64: [WireMenuItem]] = [:]
 
     public init() {}
 
@@ -65,8 +80,60 @@ public final class WindowRegistry: @unchecked Sendable {
         lock.withLock { entries[id] }
     }
 
-    public func record(id: UInt64, rect: WireRect, title: String) {
-        lock.withLock { entries[id] = Entry(id: id, rect: rect, title: title) }
+    public func record(id: UInt64, rect: WireRect, title: String, ownerPID: pid_t? = nil) {
+        lock.withLock {
+            entries[id] = Entry(
+                id: id, rect: rect, title: title, ownerPID: ownerPID ?? entries[id]?.ownerPID)
+        }
+    }
+
+    // MARK: Transient windows
+
+    /// The id for a transient WindowServer window, minting one the first time it is
+    /// seen. Ids come from the same counter as AX windows, so they are never reused
+    /// and never collide (protocol.md §3).
+    public func auxID(for windowID: CGWindowID) -> (id: UInt64, isNew: Bool) {
+        lock.withLock {
+            if let existing = idByAuxWindow[windowID] { return (existing, false) }
+            let id = nextID
+            nextID += 1
+            idByAuxWindow[windowID] = id
+            return (id, true)
+        }
+    }
+
+    public func recordAux(
+        id: UInt64, rect: WireRect, kind: WindowKind, parent: UInt64?, menuIndex: UInt32?,
+        ownerPID: pid_t
+    ) {
+        lock.withLock {
+            entries[id] = Entry(
+                id: id, rect: rect, title: "", kind: kind, parent: parent, menuIndex: menuIndex,
+                ownerPID: ownerPID)
+        }
+    }
+
+    public func removeAux(windowID: CGWindowID) -> UInt64? {
+        lock.withLock {
+            guard let id = idByAuxWindow.removeValue(forKey: windowID) else { return nil }
+            entries[id] = nil
+            return id
+        }
+    }
+
+    /// Transient windows, id-ordered.
+    public func auxSnapshot() -> [Entry] {
+        lock.withLock { entries.values.filter { $0.kind != .normal }.sorted { $0.id < $1.id } }
+    }
+
+    // MARK: Menu bars
+
+    public func menuBar(for id: UInt64) -> [WireMenuItem]? {
+        lock.withLock { menuBars[id] }
+    }
+
+    public func setMenuBar(id: UInt64, items: [WireMenuItem]) {
+        lock.withLock { menuBars[id] = items }
     }
 
     public func updateRect(id: UInt64, rect: WireRect) {
@@ -85,13 +152,16 @@ public final class WindowRegistry: @unchecked Sendable {
             idByElement[key] = nil
             elementByID[id] = nil
             entries[id] = nil
+            menuBars[id] = nil
             return id
         }
     }
 
-    /// Every live window's current state, id-ordered — the payload for a fresh
-    /// client's resync.
+    /// Every live **shared** window's current state, id-ordered — the payload for a
+    /// fresh client's resync and the set the tiler reasons about (I-5). Transient
+    /// windows are deliberately absent: they are placed by their app, not by us
+    /// (`auxSnapshot()`).
     public func snapshot() -> [Entry] {
-        lock.withLock { entries.values.sorted { $0.id < $1.id } }
+        lock.withLock { entries.values.filter { $0.kind == .normal }.sorted { $0.id < $1.id } }
     }
 }

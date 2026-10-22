@@ -54,8 +54,8 @@ struct MockResize: AsyncParsableCommand {
             switch try WireCodec.decodeControl(frame) {
             case let .hello(_, vdsSize):
                 vds = vdsSize
-            case let .windowCreated(id, rect, _, _):
-                windows.append((id, rect))
+            case let .windowCreated(id, rect, _, kind, _, _):
+                if kind == .normal { windows.append((id, rect)) }
             case .tileLayout:
                 break resync
             default:

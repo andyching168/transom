@@ -415,6 +415,11 @@ impl App {
                 self.vds = Some(vds);
                 self.ensure_source(vds);
             }
+            // Menus, popovers and input-method lists are not windows the person
+            // opens from the gallery. The Windows client does not draw them yet
+            // (the Linux client does, `linux::proxy`), so they are ignored here.
+            ModelEvent::WindowAdded(w) if w.is_transient() => {}
+            ModelEvent::MenuBarChanged { .. } => {}
             ModelEvent::WindowAdded(w) => {
                 self.windows.insert(w.id, w);
             }

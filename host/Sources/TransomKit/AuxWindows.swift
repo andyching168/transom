@@ -245,6 +245,7 @@ public final class AuxWindowTracker: @unchecked Sendable {
     private var known: [CGWindowID: (id: UInt64, rect: WireRect)] = [:]
     private var inputMethodPIDs: Set<pid_t> = []
     private var lastScan: TimeInterval = 0
+    private var activeUntil: TimeInterval = 0
 
     /// How often the process table is rescanned for new input methods.
     static let scanInterval: TimeInterval = 2
@@ -274,6 +275,23 @@ public final class AuxWindowTracker: @unchecked Sendable {
         }
         if scanned != previous { onInputMethodPIDsChanged?(scanned) }
         return scanned
+    }
+
+    /// How long to sleep before the next `poll()`. A sweep costs ~3 ms (measured), so
+    /// it runs every 40 ms while nothing is happening, and every 8 ms while a menu
+    /// is open or the client has just pressed something, when a submenu appearing a
+    /// frame late is what the person notices.
+    public var pollInterval: TimeInterval {
+        let now = ProcessInfo.processInfo.systemUptime
+        let active = lock.withLock { now < activeUntil } || !registry.auxSnapshot().isEmpty
+        return active ? 0.008 : 0.04
+    }
+
+    /// The client pressed or typed something: a menu or candidate list may be about
+    /// to open, so poll quickly for a moment.
+    public func noteActivity() {
+        let until = ProcessInfo.processInfo.systemUptime + 1.5
+        lock.withLock { activeUntil = until }
     }
 
     /// One sweep: classify what is on screen now and emit the difference.

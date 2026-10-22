@@ -474,10 +474,18 @@ public final class HostSession: @unchecked Sendable {
                     case let .requestResize(id, size, phase):
                         await resize.handle(id: id, size: size, phase: phase)
                     case .input, .requestFocus:
+                        // A press or a key may open a menu or an input-method list.
+                        if case .input(_, let event, _) = message {
+                            switch event {
+                            case .mouseDown, .keyDown: auxTracker.noteActivity()
+                            default: break
+                            }
+                        }
                         injector.handle(message)
                     case let .requestClose(id):
                         injector.close(id: id)
                     case let .menuPress(id, index):
+                        auxTracker.noteActivity()
                         let outcome = menuBar.press(id: id, index: index)
                         if case .failed(let reason) = outcome {
                             Log.ax.notice("menuPress id=\(id, privacy: .public) \(index, privacy: .public): \(reason, privacy: .public)")
@@ -501,7 +509,7 @@ public final class HostSession: @unchecked Sendable {
             Task.detached(priority: .userInitiated) {
                 while !Task.isCancelled {
                     auxTracker.poll()
-                    try? await Task.sleep(nanoseconds: 40_000_000)
+                    try? await Task.sleep(nanoseconds: UInt64(auxTracker.pollInterval * 1_000_000_000))
                 }
             })
         tasks.append(

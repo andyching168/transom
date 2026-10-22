@@ -469,7 +469,7 @@ impl App {
             }
             ModelEvent::MenuBarChanged { id, items } => {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
-                    proxy.set_menu_bar(items.clone());
+                    proxy.set_menu_bar(&self.gpu, items.clone());
                     self.frame_dirty = true;
                 }
                 self.menu_bars.insert(id, items);
@@ -699,7 +699,7 @@ impl App {
         // compositor decides); adopt it so the surface matches it exactly.
         proxy.desired = fitted;
         if let Some(items) = self.menu_bars.get(&id) {
-            proxy.set_menu_bar(items.clone());
+            proxy.set_menu_bar(&self.gpu, items.clone());
         }
         self.window_to_id.insert(window_id, id);
         self.proxies.insert(id, proxy);
@@ -845,7 +845,8 @@ impl App {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     let want = proxy.desired;
                     proxy.tracker.expect(want);
-                    let _ = inner_size_writer.request_inner_size(PhysicalSize::new(want.w, want.h));
+                    let _ = inner_size_writer
+                        .request_inner_size(PhysicalSize::new(want.w, want.h + proxy.band_at(scale_factor)));
                     eprintln!("window {id}: scale factor {scale_factor:.3}, holding {}x{} px", want.w, want.h);
                 }
             }

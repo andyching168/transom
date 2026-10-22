@@ -8,8 +8,9 @@
 //! glyphs. A click is answered by hit-testing the rectangles recorded while
 //! painting, not by egui input handling, so a strip needs no event plumbing.
 //!
-//! The strip covers the top of the Mac window, where its title bar is: the
-//! compositor already draws this window's title bar, so nothing here is needed.
+//! The strip is its own band above the content: the proxy window is taller than
+//! the Mac window by `height`, and the content is drawn below the strip, so the
+//! strip never covers any of it.
 
 use egui_wgpu::wgpu;
 

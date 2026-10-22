@@ -122,7 +122,12 @@ impl Proxy {
         if w == 0 || h == 0 {
             return vec![]; // minimized; nothing to size to
         }
-        let mut size = Size { w, h };
+        // The tracker holds the content size; the menu strip is a band above it.
+        let band = self.band();
+        let mut size = Size {
+            w,
+            h: h.saturating_sub(band).max(1),
+        };
         if now.duration_since(self.created) < STARTUP_GRACE
             && size != self.desired
             && self.startup_retries < STARTUP_RETRIES
@@ -133,16 +138,18 @@ impl Proxy {
             // chose stands and is handled as a normal resize below.
             let want = self.desired;
             self.tracker.expect(want);
-            if let Some(applied) = self.window.request_inner_size(PhysicalSize::new(want.w, want.h))
+            if let Some(applied) = self
+                .window
+                .request_inner_size(PhysicalSize::new(want.w, want.h + band))
             {
-                if applied.width == want.w && applied.height == want.h {
+                if applied.width == want.w && applied.height == want.h + band {
                     size = want;
                 }
             }
         } else {
             self.desired = size;
         }
-        gpu.configure(&self.surface, size.w, size.h);
+        gpu.configure(&self.surface, size.w, size.h + band);
         self.needs_configure = false;
         let requests = self.tracker.on_resized(size, now);
         self.report_pixel_size();
@@ -155,6 +162,7 @@ impl Proxy {
         }
         let inner = self.window.inner_size();
         let size = self.tracker.size;
+        let band = self.band();
         println!(
             "pixel-check: scale={:.3} physical={}x{} surface={}x{} {}",
             self.window.scale_factor(),
@@ -162,7 +170,7 @@ impl Proxy {
             inner.height,
             size.w,
             size.h,
-            if inner.width == size.w && inner.height == size.h {
+            if inner.width == size.w && inner.height == size.h + band {
                 "PASS"
             } else {
                 "FAIL"
@@ -195,7 +203,7 @@ impl Proxy {
         self.tracker.expect(target);
         if let Some(applied) = self
             .window
-            .request_inner_size(PhysicalSize::new(target.w, target.h))
+            .request_inner_size(PhysicalSize::new(target.w, target.h + self.band()))
         {
             if applied.width > 0 && applied.height > 0 {
                 let now = Instant::now();
@@ -232,23 +240,22 @@ impl Proxy {
         } else {
             RenderMode::Waiting
         };
+        let band = self.band();
         if self.needs_configure {
-            gpu.configure(&self.surface, size.w, size.h);
+            gpu.configure(&self.surface, size.w, size.h + band);
             self.needs_configure = false;
         }
-        // Menus and the menu strip are composed over the content. While a resize
-        // gesture stretches the content they are left out: they are placed from the
-        // settled size.
-        let composed = (!self.overlays.is_empty() || self.strip.is_some())
-            && !stretch
-            && !self.checkerboard;
+        // Menus and the menu strip are composed with the content. While a resize
+        // gesture stretches the content the menus are left out (they are placed
+        // from the settled size); the strip stays, since it is its own band.
+        let composed = (!self.overlays.is_empty() || self.strip.is_some()) && !self.checkerboard;
         if let (true, Some(tex)) = (composed, source_tex) {
-            self.render_composed(gpu, tex, ctx, (draw_w, draw_h), clear);
+            self.render_composed(gpu, tex, ctx, (crop_w, crop_h), (draw_w, draw_h), stretch, clear);
             return;
         }
         let ok = gpu.draw(
             &self.surface,
-            (size.w, size.h),
+            (size.w, size.h + band),
             (draw_w, draw_h),
             clear,
             mode,
@@ -266,6 +273,17 @@ impl Proxy {
         self.window.scale_factor()
     }
 
+    /// Height of the menu strip band above the content (physical pixels); `0`
+    /// without a menu bar.
+    pub fn band(&self) -> u32 {
+        self.band_at(self.scale())
+    }
+
+    /// `band` at another scale factor, for a scale change not yet applied.
+    pub fn band_at(&self, scale: f64) -> u32 {
+        self.strip.as_ref().map_or(0, |_| MenuStrip::height(scale))
+    }
+
     fn content(&self) -> Size {
         Size {
             w: self.source.w,
@@ -279,7 +297,10 @@ impl Proxy {
         let scale = self.scale();
         let size = self.tracker.size;
         let strip = &self.strip;
+        let band = self.band();
         let before = self.placed.clone();
+        // Laid out in content coordinates, then moved down by the strip band: a
+        // menu hanging off the strip goes at the top of the content, right under it.
         self.placed = overlay::layout(
             (size.w, size.h),
             self.source,
@@ -288,8 +309,12 @@ impl Proxy {
                 strip
                     .as_ref()
                     .and_then(|s| s.anchor_for_mac_x(item.source.x, scale))
+                    .map(|(x, y)| (x, y.saturating_sub(band)))
             },
         );
+        for p in &mut self.placed {
+            p.y += band;
+        }
         if std::env::var_os("TRANSOM_DEBUG").is_some() && before != self.placed {
             eprintln!(
                 "debug: overlays on window at {:?} client {}x{}: {:?} -> {:?}",
@@ -308,11 +333,15 @@ impl Proxy {
         gpu: &Gpu,
         tex: &SourceTexture,
         ctx: &egui::Context,
+        crop: (u32, u32),
         draw: (u32, u32),
+        stretch: bool,
         clear: Option<[f64; 4]>,
     ) {
         self.relayout();
         let size = self.tracker.size;
+        let band = self.band();
+        let surface = (size.w, size.h + band);
         let frame = match gpu.acquire(&self.surface) {
             Acquired::Frame(f) => f,
             Acquired::Reconfigure => {
@@ -325,11 +354,11 @@ impl Proxy {
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
         let mut layers = vec![Layer {
-            crop: [self.source.x, self.source.y, draw.0, draw.1],
+            crop: [self.source.x, self.source.y, crop.0, crop.1],
             target: draw,
-            dest: (0, 0),
+            dest: (0, band),
         }];
-        for p in &self.placed {
+        for p in self.placed.iter().filter(|_| !stretch) {
             layers.push(Layer {
                 crop: [p.crop.x, p.crop.y, p.w, p.h],
                 target: (p.w, p.h),
@@ -344,7 +373,7 @@ impl Proxy {
         gpu.encode_layers(
             &mut encoder,
             &view,
-            (size.w, size.h),
+            surface,
             clear.unwrap_or([0.0, 0.0, 0.0, 1.0]),
             &layers,
             tex,
@@ -352,7 +381,7 @@ impl Proxy {
         let scale = self.scale();
         let mut extra = Vec::new();
         if let Some(strip) = self.strip.as_mut() {
-            extra = strip.paint(gpu, ctx, &mut encoder, &view, (size.w, size.h), scale);
+            extra = strip.paint(gpu, ctx, &mut encoder, &view, surface, scale);
         }
         gpu.queue()
             .submit(extra.into_iter().chain([encoder.finish()]));
@@ -364,8 +393,28 @@ impl Proxy {
         self.overlays = overlays;
     }
 
-    /// Replace the menu bar. An empty one removes the strip.
-    pub fn set_menu_bar(&mut self, items: Vec<crate::wire::MenuItem>) {
+    /// Replace the menu bar. An empty one removes the strip. The strip is a band
+    /// above the content, so the window grows or shrinks by its height to leave the
+    /// content size (and the Mac window's) unchanged.
+    pub fn set_menu_bar(&mut self, gpu: &Gpu, items: Vec<crate::wire::MenuItem>) {
+        let before = self.band();
+        self.replace_menu_bar(items);
+        if self.band() != before {
+            let content = self.tracker.size;
+            self.tracker.expect(content);
+            if let Some(applied) = self
+                .window
+                .request_inner_size(PhysicalSize::new(content.w, content.h + self.band()))
+            {
+                if applied.width > 0 && applied.height > 0 {
+                    self.resized(gpu, applied.width, applied.height, Instant::now());
+                }
+            }
+            self.needs_configure = true;
+        }
+    }
+
+    fn replace_menu_bar(&mut self, items: Vec<crate::wire::MenuItem>) {
         if items.is_empty() {
             self.strip = None;
         } else if let Some(strip) = self.strip.as_mut() {
@@ -402,7 +451,7 @@ impl Proxy {
     fn local(&self, target: u64) -> Option<((i32, i32), Size)> {
         let (x, y) = self.cursor;
         if target == 0 {
-            return Some(((x, y), self.content()));
+            return Some(((x, y - self.band() as i32), self.content()));
         }
         let p = self.placed.iter().find(|p| p.id == target)?;
         // In the whole popup's coordinates, which is what the host maps.

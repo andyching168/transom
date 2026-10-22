@@ -30,11 +30,11 @@
 
 mod connections;
 mod discovery;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 mod hevc;
 mod model;
 mod net;
-#[cfg(any(windows, test))]
+#[cfg(any(windows, target_os = "linux", test))]
 mod pointer;
 mod runner;
 mod session;
@@ -44,6 +44,8 @@ mod wire;
 
 #[cfg(windows)]
 mod doctor;
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(windows)]
 mod win;
 
@@ -80,12 +82,12 @@ fn main() -> ExitCode {
 /// product path: open the connection window instead of printing CLI help and
 /// exiting. The command-line surface remains available through explicit
 /// subcommands (`run`, `connect`, and `doctor`).
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "linux"))]
 fn run_default() -> ExitCode {
     run_gui(&[])
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "linux")))]
 fn run_default() -> ExitCode {
     print_usage();
     ExitCode::SUCCESS
@@ -96,7 +98,12 @@ fn run_doctor() -> ExitCode {
     doctor::run()
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn run_doctor() -> ExitCode {
+    linux::doctor::run()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn run_doctor() -> ExitCode {
     eprintln!(
         "doctor checks D3D11, DPI awareness, and monitors — it only runs on Windows.\n\
@@ -110,7 +117,12 @@ fn run_gui(args: &[String]) -> ExitCode {
     win::run(args)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn run_gui(args: &[String]) -> ExitCode {
+    linux::run(args)
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn run_gui(_args: &[String]) -> ExitCode {
     eprintln!(
         "`run` is the native Windows window manager (D3D11 + Win32) and only runs on Windows.\n\

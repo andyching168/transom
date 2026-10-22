@@ -25,7 +25,7 @@ pub fn scan() -> io::Result<Vec<Connection>> {
             if s.set_nonblocking(true).is_err() || s.set_multicast_ttl_v4(255).is_err() {
                 continue;
             }
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "linux"))]
             if set_interface(&s, ip).is_err() {
                 continue;
             }
@@ -284,7 +284,63 @@ fn set_interface(s: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
     }
     Ok(())
 }
-#[cfg(not(windows))]
+/// Every up, private-or-link-local IPv4 address (via `getifaddrs`). Multicast
+/// goes out of the interface a socket is bound to, so each one is queried
+/// separately: with a VPN or container bridge present, the default route alone
+/// would miss the LAN the Mac is on.
+#[cfg(target_os = "linux")]
+fn interfaces() -> Vec<Ipv4Addr> {
+    let mut found = Vec::new();
+    unsafe {
+        let mut list: *mut libc::ifaddrs = std::ptr::null_mut();
+        if libc::getifaddrs(&mut list) != 0 {
+            return found;
+        }
+        let mut cursor = list;
+        while !cursor.is_null() {
+            let entry = &*cursor;
+            cursor = entry.ifa_next;
+            let up = entry.ifa_flags & libc::IFF_UP as u32 != 0
+                && entry.ifa_flags & libc::IFF_LOOPBACK as u32 == 0;
+            if !up || entry.ifa_addr.is_null() || (*entry.ifa_addr).sa_family as i32 != libc::AF_INET
+            {
+                continue;
+            }
+            let addr = &*(entry.ifa_addr as *const libc::sockaddr_in);
+            let ip = Ipv4Addr::from(u32::from_be(addr.sin_addr.s_addr));
+            if (ip.is_private() || ip.is_link_local()) && !found.contains(&ip) {
+                found.push(ip);
+            }
+        }
+        libc::freeifaddrs(list);
+    }
+    found
+}
+#[cfg(target_os = "linux")]
+fn set_interface(s: &UdpSocket, ip: Ipv4Addr) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let addr = libc::in_addr {
+        s_addr: u32::from_ne_bytes(ip.octets()),
+    };
+    let rc = unsafe {
+        libc::setsockopt(
+            s.as_raw_fd(),
+            libc::IPPROTO_IP,
+            libc::IP_MULTICAST_IF,
+            (&addr as *const libc::in_addr).cast(),
+            std::mem::size_of::<libc::in_addr>() as libc::socklen_t,
+        )
+    };
+    if rc != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+#[cfg(target_os = "linux")]
+pub fn local_interfaces() -> Vec<Ipv4Addr> {
+    interfaces()
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 fn interfaces() -> Vec<Ipv4Addr> {
     vec![Ipv4Addr::UNSPECIFIED]
 }

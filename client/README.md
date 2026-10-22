@@ -227,3 +227,34 @@ any window or GDI object exists.
 ## License
 
 [AGPL-3.0](../LICENSE).
+
+
+## Linux / Wayland client
+
+`transom-client` also builds and runs on Linux under Wayland (module `src/linux/`,
+Windows-only code stays under `src/win/`). It speaks the same protocol through the
+shared pure core, shows each Mac window as a native Wayland toplevel (winit), blits
+the decoded frame 1:1 with a point-fetched wgpu shader, draws the dashboard with
+egui, and decodes HEVC with libavcodec.
+
+Build requirements: Rust, FFmpeg development headers (`libavcodec-free-devel` on
+Fedora, plus the other `-devel` packages FFmpeg needs), and clang for bindgen. If
+bindgen cannot find clang's builtin headers, set
+`BINDGEN_EXTRA_CLANG_ARGS="-I$(clang -print-resource-dir)/include"`.
+
+Runtime requirement: an FFmpeg with an **HEVC decoder**. Fedora's `ffmpeg-free`
+omits it; install `libavcodec-freeworld` from RPM Fusion.
+
+```sh
+cargo run -- doctor            # Wayland, GPU, HEVC decoder and LAN checks
+cargo run -- run               # dashboard
+cargo run -- run 192.168.1.20  # connect directly (--open-all opens every window)
+```
+
+Differences from Windows: Wayland cannot position or hide windows (closing a proxy
+destroys it; the dashboard reopens it); interactive resize is inferred from
+configure events and ended after 150 ms of quiet; keys are sent by physical
+position as Windows VK codes; saved Macs live in
+`$XDG_CONFIG_HOME/transom/connections.json`; the disconnect shortcut
+(Ctrl+Alt+Shift+D) works while a Transom window has focus. Set
+`TRANSOM_DECODE_THREADS=1` for the lowest decode latency.

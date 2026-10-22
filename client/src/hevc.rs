@@ -4,6 +4,7 @@
 #[derive(Debug)]
 pub struct HevcConfig {
     pub length_size: usize,
+    #[cfg_attr(not(windows), allow(dead_code))]
     pub profile: u32,
     pub chroma: u8,
     pub bit_depth: u8,

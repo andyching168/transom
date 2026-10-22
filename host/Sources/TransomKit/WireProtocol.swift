@@ -65,10 +65,15 @@ public struct WireMenuItem: Codable, Equatable, Sendable {
     public var index: UInt32
     public var title: String
     public var enabled: Bool
-    public init(index: UInt32, title: String, enabled: Bool = true) {
+    /// Where the Mac drew this title in the menu bar, VDS pixels. The menu it opens
+    /// is drawn at the same x, which is how a client tells which item a menu window
+    /// belongs to (a window can be reused for a different menu).
+    public var x: UInt32?
+    public init(index: UInt32, title: String, enabled: Bool = true, x: UInt32? = nil) {
         self.index = index
         self.title = title
         self.enabled = enabled
+        self.x = x
     }
 }
 

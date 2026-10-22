@@ -21,8 +21,8 @@ pub struct Item {
     pub parent: Option<u64>,
     /// Its place in the shared texture.
     pub source: Rect,
-    /// Set when the menu was opened from the menu strip's item with this index.
-    pub menu_index: Option<u32>,
+    /// A native menu (rather than a popover or an input-method list).
+    pub menu: bool,
 }
 
 /// Where an `Item` ends up in the parent's client area.
@@ -56,7 +56,8 @@ impl Placed {
 
 /// Lay `items` out in a client area of `client` pixels whose shared window is at
 /// `root` in the texture. `items` must list a parent before its children (the host
-/// announces them in that order). `anchor` gives, for a menu-strip item index, the
+/// announces them in that order). `anchor` gives, for a menu hanging off the window that the Mac drew wholly
+/// outside it, where to put it: the
 /// x of its left edge and the y just below the strip.
 ///
 /// **Where the Mac drew a popup decides how it is shown**, because the window's own
@@ -74,7 +75,7 @@ pub fn layout(
     client: (u32, u32),
     root: Rect,
     items: &[Item],
-    anchor: impl Fn(u32) -> Option<(u32, u32)>,
+    anchor: impl Fn(&Item) -> Option<(u32, u32)>,
 ) -> Vec<Placed> {
     let (cw, ch) = (client.0 as i64, client.1 as i64);
     let mut placed: Vec<Placed> = Vec::with_capacity(items.len());
@@ -119,9 +120,12 @@ pub fn layout(
         }
         // Wholly outside: nothing of it is in the window's crop.
         let (mut x, mut y) = (nx, ny);
-        if let Some((ax, ay)) = item.menu_index.and_then(&anchor) {
-            x = ax as i64;
-            y = ay as i64;
+        let hangs_off_window = !origins.iter().any(|o| Some(o.0) == item.parent);
+        if item.menu && hangs_off_window {
+            if let Some((ax, ay)) = anchor(item) {
+                x = ax as i64;
+                y = ay as i64;
+            }
         }
         let vw = w.min(cw).max(1);
         let vh = h.min(ch).max(1);
@@ -179,11 +183,11 @@ mod tests {
             id,
             parent,
             source: Rect { x, y, w, h },
-            menu_index: None,
+            menu: false,
         }
     }
 
-    fn no_anchor(_: u32) -> Option<(u32, u32)> {
+    fn no_anchor(_: &Item) -> Option<(u32, u32)> {
         None
     }
 
@@ -220,7 +224,7 @@ mod tests {
         // The reported bug: a large window covers where the Mac drew the menu, so
         // the crop already holds the menu. Anchoring it elsewhere showed it twice.
         let mut menu = item(2, Some(1), 262, 700, 165, 300);
-        menu.menu_index = Some(2);
+        menu.menu = true;
         let placed = layout((520, 348), ROOT, &[menu], |_| Some((90, 28)));
         assert_eq!((placed[0].x, placed[0].y), (62, 68));
     }
@@ -237,23 +241,23 @@ mod tests {
         // The Mac put the File menu at the top of the display, nowhere near the
         // window; the strip item decides.
         let mut menu = item(2, Some(1), 162, 25, 55, 32);
-        menu.menu_index = Some(2);
-        let placed = layout((520, 348), ROOT, &[menu], |i| (i == 2).then_some((90, 28)));
+        menu.menu = true;
+        let placed = layout((520, 348), ROOT, &[menu], |_| Some((90, 28)));
         assert_eq!((placed[0].x, placed[0].y), (90, 28));
     }
 
     #[test]
-    fn a_menu_whose_item_is_unknown_falls_back_to_its_offset() {
-        let mut menu = item(2, Some(1), 262, 700, 55, 32);
-        menu.menu_index = Some(9);
+    fn a_menu_with_no_known_item_is_slid_inside_instead() {
+        let mut menu = item(2, Some(1), 100, 25, 55, 32);
+        menu.menu = true;
         let placed = layout((520, 348), ROOT, &[menu], no_anchor);
-        assert_eq!((placed[0].x, placed[0].y), (62, 68));
+        assert_eq!((placed[0].x, placed[0].y), (0, 0));
     }
 
     #[test]
     fn a_submenu_follows_its_menu_when_that_was_slid() {
         let mut menu = item(2, Some(1), 162, 25, 100, 60);
-        menu.menu_index = Some(2);
+        menu.menu = true;
         // The submenu sits 100px right of the menu on the Mac.
         let sub = item(3, Some(2), 262, 30, 100, 60);
         let placed = layout((520, 348), ROOT, &[menu, sub], |_| Some((90, 28)));

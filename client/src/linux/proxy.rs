@@ -279,12 +279,23 @@ impl Proxy {
         let scale = self.scale();
         let size = self.tracker.size;
         let strip = &self.strip;
+        let before = self.placed.clone();
         self.placed = overlay::layout(
             (size.w, size.h),
             self.source,
             &self.overlays,
-            |index| strip.as_ref().and_then(|s| s.anchor(index, scale)),
+            |item| {
+                strip
+                    .as_ref()
+                    .and_then(|s| s.anchor_for_mac_x(item.source.x, scale))
+            },
         );
+        if std::env::var_os("TRANSOM_DEBUG").is_some() && before != self.placed {
+            eprintln!(
+                "debug: overlays on window at {:?} client {}x{}: {:?} -> {:?}",
+                self.source, size.w, size.h, self.overlays, self.placed
+            );
+        }
         let live: Vec<u64> = self.overlays.iter().map(|o| o.id).collect();
         self.gates.retain(|id, _| live.contains(id));
         if self.grab.is_some_and(|g| g != 0 && !live.contains(&g)) {

@@ -33,7 +33,7 @@ struct WireProtocolTests {
             .menuBar(
                 id: 1,
                 items: [
-                    WireMenuItem(index: 1, title: "檔案"),
+                    WireMenuItem(index: 1, title: "檔案", x: 106),
                     WireMenuItem(index: 2, title: "編輯", enabled: false),
                 ]),
             .windowMoved(id: 1, rect: WireRect(x: 1512, y: 60, w: 1312, h: 844)),

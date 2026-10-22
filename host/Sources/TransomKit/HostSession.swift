@@ -378,7 +378,7 @@ public final class HostSession: @unchecked Sendable {
         // transient windows, and the menu bar (which is not in the capture at all)
         // travels as structured data. See AuxWindows.swift / MenuBarService.swift.
         let sharedPIDs = Set(targets.map(\.pid))
-        let menuBar = MenuBarService(registry: registry, emit: { event in eventSink.yield(event) })
+        let menuBar = MenuBarService(registry: registry, display: disp, emit: { event in eventSink.yield(event) })
         self.menuBar = menuBar
         let auxTracker = AuxWindowTracker(
             display: disp, registry: registry, sharedPIDs: sharedPIDs,

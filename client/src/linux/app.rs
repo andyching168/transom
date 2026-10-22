@@ -801,7 +801,7 @@ impl App {
                 id: t.id,
                 parent: t.parent,
                 source: t.source,
-                menu_index: t.menu_index,
+                menu: t.kind == crate::wire::WindowKind::Menu,
             });
         }
         for (id, proxy) in self.proxies.iter_mut() {

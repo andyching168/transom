@@ -300,13 +300,13 @@ struct MenuBarTests {
     @Test("the Apple menu and untitled items are dropped; indices stay the AX positions")
     func titles() {
         let items = MenuBar.titles(of: [
-            ("Apple", true), ("Finder", true), ("檔案", true), (nil, true), ("", true),
-            ("編輯", false),
+            ("Apple", true, 10), ("Finder", true, 44), ("檔案", true, 106), (nil, true, 150),
+            ("", true, 160), ("編輯", false, nil),
         ])
         #expect(
             items == [
-                WireMenuItem(index: 1, title: "Finder"),
-                WireMenuItem(index: 2, title: "檔案"),
+                WireMenuItem(index: 1, title: "Finder", x: 44),
+                WireMenuItem(index: 2, title: "檔案", x: 106),
                 WireMenuItem(index: 5, title: "編輯", enabled: false),
             ])
     }

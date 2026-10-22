@@ -83,6 +83,8 @@ pub struct MenuItem {
     pub index: u32,
     pub title: String,
     pub enabled: bool,
+    /// Where the Mac drew the title in its menu bar (VDS pixels), if known.
+    pub x: Option<u32>,
 }
 
 /// Host → client. The full set the host can push (`ControlMessage` in Swift).
@@ -267,6 +269,7 @@ impl ServerMessage {
                         index: u32_field(item, "index")?,
                         title: str_field(item, "title")?,
                         enabled: item.get("enabled").and_then(|e| e.as_bool()).unwrap_or(true),
+                        x: item.get("x").and_then(|x| x.as_u32()),
                     });
                 }
                 Ok(ServerMessage::MenuBar {
@@ -463,7 +466,7 @@ mod tests {
     #[test]
     fn decodes_menu_bar_and_encodes_menu_press() {
         let msg = ServerMessage::decode(
-            r#"{"type":"menuBar","id":4,"items":[{"index":1,"title":"檔案","enabled":true},{"index":2,"title":"編輯","enabled":false},{"index":3,"title":"檢視"}]}"#
+            r#"{"type":"menuBar","id":4,"items":[{"index":1,"title":"檔案","enabled":true,"x":106},{"index":2,"title":"編輯","enabled":false},{"index":3,"title":"檢視"}]}"#
                 .as_bytes(),
         )
         .unwrap();
@@ -472,10 +475,10 @@ mod tests {
             ServerMessage::MenuBar {
                 id: 4,
                 items: vec![
-                    MenuItem { index: 1, title: "檔案".into(), enabled: true },
-                    MenuItem { index: 2, title: "編輯".into(), enabled: false },
+                    MenuItem { index: 1, title: "檔案".into(), enabled: true, x: Some(106) },
+                    MenuItem { index: 2, title: "編輯".into(), enabled: false, x: None },
                     // `enabled` omitted: an item is enabled unless the host says not.
-                    MenuItem { index: 3, title: "檢視".into(), enabled: true },
+                    MenuItem { index: 3, title: "檢視".into(), enabled: true, x: None },
                 ]
             }
         );

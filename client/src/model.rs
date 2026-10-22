@@ -532,8 +532,8 @@ mod tests {
     #[test]
     fn menu_bar_is_stored_reported_once_and_dropped_with_its_window() {
         let items = vec![
-            MenuItem { index: 1, title: "檔案".into(), enabled: true },
-            MenuItem { index: 2, title: "編輯".into(), enabled: false },
+            MenuItem { index: 1, title: "檔案".into(), enabled: true, x: Some(106) },
+            MenuItem { index: 2, title: "編輯".into(), enabled: false, x: None },
         ];
         let mut m = WindowModel::new();
         m.apply(created(1, rect(0, 0, 10, 10), "A"));

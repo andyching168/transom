@@ -23,19 +23,40 @@ public enum MenuBar {
     /// every app's menu bar: system-wide, not the shared app's, and it offers
     /// Shut Down). `index` is the item's position in the AX menu bar, which is what
     /// `press` takes back.
-    public static func items(pid: pid_t) -> [WireMenuItem]? {
+    public static func items(pid: pid_t, display: DisplayInfo? = nil) -> [WireMenuItem]? {
         guard let children = barChildren(pid: pid) else { return nil }
         return titles(of: children.map { child in
-            (string(child, kAXTitleAttribute), bool(child, kAXEnabledAttribute) ?? true)
+            (
+                string(child, kAXTitleAttribute), bool(child, kAXEnabledAttribute) ?? true,
+                display.flatMap { x(of: child, display: $0) }
+            )
         })
     }
 
-    /// Pure: AX (title, enabled) pairs → wire items.
-    static func titles(of entries: [(String?, Bool)]) -> [WireMenuItem] {
+    /// Pure: AX (title, enabled, x) triples → wire items.
+    static func titles(of entries: [(String?, Bool, UInt32?)]) -> [WireMenuItem] {
         entries.enumerated().compactMap { index, entry in
             guard index > 0, let title = entry.0, !title.isEmpty else { return nil }
-            return WireMenuItem(index: UInt32(index), title: title, enabled: entry.1)
+            return WireMenuItem(
+                index: UInt32(index), title: title, enabled: entry.1, x: entry.2)
         }
+    }
+
+    /// The item's left edge in VDS pixels, from its AX position (points).
+    private static func x(of item: AXUIElement, display: DisplayInfo) -> UInt32? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(item, kAXPositionAttribute as CFString, &value) == .success,
+            let value, CFGetTypeID(value) == AXValueGetTypeID()
+        else { return nil }
+        var point = CGPoint.zero
+        guard AXValueGetValue(unsafeDowncast(value, to: AXValue.self), .cgPoint, &point) else {
+            return nil
+        }
+        let pixels = Coordinates.displayPixels(
+            fromAXRect: CGRect(origin: point, size: .zero),
+            displayOriginPoints: display.originPoints, scale: display.scale)
+        guard pixels.minX.isFinite, pixels.minX >= 0 else { return nil }
+        return UInt32(min(pixels.minX.rounded(), CGFloat(UInt32.max)))
     }
 
     public enum PressOutcome: Equatable, Sendable {
@@ -99,6 +120,7 @@ public enum MenuBar {
 /// called from different tasks.
 public final class MenuBarService: @unchecked Sendable {
     private let registry: WindowRegistry
+    private let display: DisplayInfo?
     private let emit: @Sendable (WindowWatcher.WindowEvent) -> Void
 
     private struct Pressed {
@@ -112,9 +134,11 @@ public final class MenuBarService: @unchecked Sendable {
     static let pressWindow: TimeInterval = 3
 
     public init(
-        registry: WindowRegistry, emit: @escaping @Sendable (WindowWatcher.WindowEvent) -> Void
+        registry: WindowRegistry, display: DisplayInfo? = nil,
+        emit: @escaping @Sendable (WindowWatcher.WindowEvent) -> Void
     ) {
         self.registry = registry
+        self.display = display
         self.emit = emit
     }
 
@@ -144,7 +168,7 @@ public final class MenuBarService: @unchecked Sendable {
             byPID[pid, default: []].append(window)
         }
         for (pid, entries) in byPID {
-            guard let items = MenuBar.items(pid: pid) else { continue }
+            guard let items = MenuBar.items(pid: pid, display: display) else { continue }
             for entry in entries where registry.menuBar(for: entry.id) != items {
                 registry.setMenuBar(id: entry.id, items: items)
                 emit(.menuBar(id: entry.id, items: items))

@@ -54,11 +54,11 @@ struct Aux: AsyncParsableCommand {
                 ?? TransomKit.Displays.all().first(where: { $0.isMain })
         else { throw ProbeError("No display found.") }
 
-        let items = MenuBar.items(pid: target.pid)
+        let items = MenuBar.items(pid: target.pid, display: info)
         print("\(target.name) (pid \(target.pid)) on display \(info.id): "
             + "\(info.pixelWidth)x\(info.pixelHeight) px @\(info.scale)x")
         if let items {
-            print("menu bar: " + items.map { "[\($0.index)] \($0.title)\($0.enabled ? "" : " (disabled)")" }.joined(separator: "  "))
+            print("menu bar: " + items.map { "[\($0.index)] \($0.title)@\($0.x.map(String.init) ?? "?")\($0.enabled ? "" : " (disabled)")" }.joined(separator: "  "))
         } else {
             print("menu bar: unreadable (is Accessibility granted?)")
         }

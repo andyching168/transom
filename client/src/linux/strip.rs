@@ -67,6 +67,18 @@ impl MenuStrip {
             .map(|s| (s.x0, Self::height(scale)))
     }
 
+    /// Where to put a menu the Mac drew with its left edge at `mac_x` (VDS pixels):
+    /// under the title the Mac drew at the nearest x, so the right menu goes under
+    /// the right title even if the Mac reused one window for several menus.
+    pub fn anchor_for_mac_x(&self, mac_x: u32, scale: f64) -> Option<(u32, u32)> {
+        let nearest = self
+            .items
+            .iter()
+            .filter_map(|i| i.x.map(|x| (i.index, x.abs_diff(mac_x))))
+            .min_by_key(|(_, d)| *d)?;
+        self.anchor(nearest.0, scale)
+    }
+
     /// Paint the strip over the frame in `view` (which must already hold the
     /// window's content) and record where each title went. Returns command
     /// buffers to submit ahead of `encoder`'s.
@@ -190,6 +202,10 @@ mod tests {
 
     fn strip() -> MenuStrip {
         let mut s = MenuStrip::default();
+        s.items = vec![
+            MenuItem { index: 1, title: "A".into(), enabled: true, x: Some(44) },
+            MenuItem { index: 3, title: "C".into(), enabled: true, x: Some(152) },
+        ];
         s.slots = vec![
             Slot { index: 1, x0: 6, x1: 60, enabled: true },
             Slot { index: 2, x0: 60, x1: 110, enabled: false },
@@ -216,6 +232,13 @@ mod tests {
         assert_eq!(s.item_at(400, 10, 1.0), None);
         assert_eq!(s.item_at(30, 28, 1.0), None);
         assert_eq!(s.item_at(30, -1, 1.0), None);
+    }
+
+    #[test]
+    fn a_menu_goes_under_the_title_nearest_its_mac_x() {
+        let s = strip();
+        assert_eq!(s.anchor_for_mac_x(148, 1.0), Some((110, 28)));
+        assert_eq!(s.anchor_for_mac_x(40, 1.0), Some((6, 28)));
     }
 
     #[test]

@@ -419,7 +419,7 @@ impl App {
             // opens from the gallery. The Windows client does not draw them yet
             // (the Linux client does, `linux::proxy`), so they are ignored here.
             ModelEvent::WindowAdded(w) if w.is_transient() => {}
-            ModelEvent::MenuBarChanged { .. } => {}
+            ModelEvent::MenuBarChanged { .. } | ModelEvent::CursorChanged { .. } => {}
             ModelEvent::WindowAdded(w) => {
                 self.windows.insert(w.id, w);
             }

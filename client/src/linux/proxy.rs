@@ -15,12 +15,13 @@ use std::time::{Duration, Instant};
 
 use egui_wgpu::wgpu;
 use egui_winit::winit::dpi::PhysicalSize;
-use egui_winit::winit::window::Window;
+use egui_winit::winit::window::{CursorIcon, Window};
 
 use super::gpu::{Acquired, Gpu, Layer, RenderMode, SourceTexture};
 use super::input::ScrollAccumulator;
 use super::resize::{Request, ResizeTracker};
 use super::strip::MenuStrip;
+use crate::wire::CursorShape;
 use crate::overlay::{self, Placed};
 use crate::pointer::PointerGate;
 use crate::wire::{InputEvent, MouseButton, Rect, Size};
@@ -74,6 +75,25 @@ pub struct Proxy {
     grab: Option<u64>,
     /// A press was spent on the menu strip; its release is too.
     strip_press: bool,
+    /// What the Mac's pointer looks like under the client's pointer (`cursor`).
+    mac_cursor: CursorShape,
+    /// The icon last set on the window, so a motion event only calls into the
+    /// compositor when it changes.
+    applied_cursor: CursorIcon,
+}
+
+fn icon(shape: CursorShape) -> CursorIcon {
+    match shape {
+        CursorShape::Arrow => CursorIcon::Default,
+        CursorShape::IBeam => CursorIcon::Text,
+        CursorShape::PointingHand => CursorIcon::Pointer,
+        CursorShape::Crosshair => CursorIcon::Crosshair,
+        CursorShape::ResizeLeftRight => CursorIcon::EwResize,
+        CursorShape::ResizeUpDown => CursorIcon::NsResize,
+        CursorShape::OpenHand => CursorIcon::Grab,
+        CursorShape::ClosedHand => CursorIcon::Grabbing,
+        CursorShape::NotAllowed => CursorIcon::NotAllowed,
+    }
 }
 
 impl Proxy {
@@ -113,6 +133,8 @@ impl Proxy {
             gates: HashMap::new(),
             grab: None,
             strip_press: false,
+            mac_cursor: CursorShape::Arrow,
+            applied_cursor: CursorIcon::Default,
         })
     }
 
@@ -388,6 +410,21 @@ impl Proxy {
         gpu.queue().present(frame);
     }
 
+    /// The Mac's pointer shape changed under the client's pointer. The strip is the
+    /// client's own, so over it the pointer stays the default arrow.
+    pub fn set_mac_cursor(&mut self, shape: CursorShape) {
+        self.mac_cursor = shape;
+        self.apply_cursor(false);
+    }
+
+    fn apply_cursor(&mut self, over_strip: bool) {
+        let want = if over_strip { CursorIcon::Default } else { icon(self.mac_cursor) };
+        if want != self.applied_cursor {
+            self.applied_cursor = want;
+            self.window.set_cursor(want);
+        }
+    }
+
     /// Replace the transient windows hanging off this window.
     pub fn set_overlays(&mut self, overlays: Vec<overlay::Item>) {
         self.overlays = overlays;
@@ -476,6 +513,7 @@ impl Proxy {
             strip.hover = hover;
         }
         let redraw = before != hover;
+        self.apply_cursor(hover.is_some());
         let Target::Window(t) = target else {
             return (Pointer::Nothing, redraw);
         };

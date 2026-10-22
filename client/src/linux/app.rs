@@ -467,6 +467,12 @@ impl App {
                 self.transients.insert(w.id, w);
                 self.sync_overlays();
             }
+            ModelEvent::CursorChanged { id, shape } => {
+                // A menu or popover's shape applies to the window it hangs off.
+                if let Some(proxy) = self.root_of(id).and_then(|r| self.proxies.get_mut(&r)) {
+                    proxy.set_mac_cursor(shape);
+                }
+            }
             ModelEvent::MenuBarChanged { id, items } => {
                 if let Some(proxy) = self.proxies.get_mut(&id) {
                     proxy.set_menu_bar(&self.gpu, items.clone());

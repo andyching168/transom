@@ -238,6 +238,9 @@ fn print_control(ev: &ModelEvent, t: u64) {
                 _ => String::new(),
             }
         ),
+        ModelEvent::CursorChanged { id, shape } => {
+            println!("[{t:>6}ms] cursor over window {id}: {shape:?}")
+        }
         ModelEvent::MenuBarChanged { id, items } => println!(
             "[{t:>6}ms] menu bar of window {id}: {}",
             items

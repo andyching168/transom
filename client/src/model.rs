@@ -13,7 +13,7 @@
 //!  * The host reports **actual** geometry (I-4); the model just stores what it is
 //!    told and never assumes a requested size took effect.
 
-use crate::wire::{MenuItem, Rect, ServerMessage, Size, WindowKind};
+use crate::wire::{CursorShape, MenuItem, Rect, ServerMessage, Size, WindowKind};
 
 /// One managed window. `source` is its crop in the shared texture; its `w`/`h`
 /// are also exactly the pixel size the native proxy window's client area must be,
@@ -79,6 +79,11 @@ pub enum ModelEvent {
     MenuBarChanged {
         id: u64,
         items: Vec<MenuItem>,
+    },
+    /// The pointer shape over window `id` (shared or transient) is now `shape`.
+    CursorChanged {
+        id: u64,
+        shape: CursorShape,
     },
     /// The host sent an `error`. Surfaced for logging; not fatal on its own.
     HostError {
@@ -148,6 +153,7 @@ impl WindowModel {
                 self.announced.clear();
                 vec![ModelEvent::Connected { vds }]
             }
+            ServerMessage::Cursor { id, shape } => vec![ModelEvent::CursorChanged { id, shape }],
             ServerMessage::MenuBar { id, items } => {
                 if self.menu_bars.get(&id) == Some(&items) {
                     return Vec::new();

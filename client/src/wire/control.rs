@@ -87,6 +87,39 @@ pub struct MenuItem {
     pub x: Option<u32>,
 }
 
+/// The Mac's pointer shape over a window, as the host judged it. Anything the
+/// host sends that this build does not know is `Arrow`, so a newer host's shape
+/// degrades to the default pointer instead of failing the message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CursorShape {
+    #[default]
+    Arrow,
+    IBeam,
+    PointingHand,
+    Crosshair,
+    ResizeLeftRight,
+    ResizeUpDown,
+    OpenHand,
+    ClosedHand,
+    NotAllowed,
+}
+
+impl CursorShape {
+    pub fn from_wire(s: &str) -> CursorShape {
+        match s {
+            "ibeam" => CursorShape::IBeam,
+            "pointingHand" => CursorShape::PointingHand,
+            "crosshair" => CursorShape::Crosshair,
+            "resizeLeftRight" => CursorShape::ResizeLeftRight,
+            "resizeUpDown" => CursorShape::ResizeUpDown,
+            "openHand" => CursorShape::OpenHand,
+            "closedHand" => CursorShape::ClosedHand,
+            "notAllowed" => CursorShape::NotAllowed,
+            _ => CursorShape::Arrow,
+        }
+    }
+}
+
 /// Host → client. The full set the host can push (`ControlMessage` in Swift).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ServerMessage {
@@ -111,6 +144,12 @@ pub enum ServerMessage {
     MenuBar {
         id: u64,
         items: Vec<MenuItem>,
+    },
+    /// What the Mac's pointer looks like over window `id` (a shared or a transient
+    /// window): sent when the shape under the client's pointer changes.
+    Cursor {
+        id: u64,
+        shape: CursorShape,
     },
     /// ACTUAL geometry after an AX write or observed move (I-4), never requested.
     WindowMoved {
@@ -277,6 +316,10 @@ impl ServerMessage {
                     items,
                 })
             }
+            "cursor" => Ok(ServerMessage::Cursor {
+                id: u64_field(&v, "id")?,
+                shape: CursorShape::from_wire(str_field(&v, "shape")?.as_str()),
+            }),
             "windowMoved" => Ok(ServerMessage::WindowMoved {
                 id: u64_field(&v, "id")?,
                 rect: rect_field(&v, "rect")?,
@@ -487,6 +530,14 @@ mod tests {
             String::from_utf8(press).unwrap(),
             r#"{"type":"menuPress","id":4,"index":2}"#
         );
+    }
+
+    #[test]
+    fn decodes_cursor_and_unknown_shapes_fall_back_to_arrow() {
+        let msg = ServerMessage::decode(br#"{"type":"cursor","id":3,"shape":"ibeam"}"#).unwrap();
+        assert_eq!(msg, ServerMessage::Cursor { id: 3, shape: CursorShape::IBeam });
+        let msg = ServerMessage::decode(br#"{"type":"cursor","id":3,"shape":"future"}"#).unwrap();
+        assert_eq!(msg, ServerMessage::Cursor { id: 3, shape: CursorShape::Arrow });
     }
 
     #[test]

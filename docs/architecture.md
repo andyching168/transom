@@ -816,6 +816,14 @@ the Linux client draws transient windows inside their parent's surface
 and cropping (never scaling) one taller than the window. A menu taller than its window
 therefore loses its bottom.
 
+**Do not move a popup that is over the window (reported 2026-10-23, Word).** The
+window's crop of the shared texture already contains whatever a popup covers there.
+Anchoring such a menu under the client's menu strip drew it twice at two offsets, a
+garbled double image. The rule (`overlay::layout`): if any of the popup lies over the
+window it is drawn exactly where the Mac drew it, clipped to the client area; only a
+popup wholly outside the window (nothing of it in the crop) is anchored or slid inside.
+A pointer position on a clipped popup is reported in the whole popup's coordinates.
+
 ### An application *inclusion* filter drops menus (measured 2026-10-23)
 
 With `SCContentFilter(display:including:applications…)` — and equally with

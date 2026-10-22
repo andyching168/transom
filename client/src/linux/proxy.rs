@@ -394,9 +394,13 @@ impl Proxy {
             return Some(((x, y), self.content()));
         }
         let p = self.placed.iter().find(|p| p.id == target)?;
+        // In the whole popup's coordinates, which is what the host maps.
         Some((
-            (x - p.x as i32, y - p.y as i32),
-            Size { w: p.w, h: p.h },
+            (x - p.x as i32 + p.off.0 as i32, y - p.y as i32 + p.off.1 as i32),
+            Size {
+                w: p.full.0,
+                h: p.full.1,
+            },
         ))
     }
 

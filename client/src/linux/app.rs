@@ -7,7 +7,7 @@
 //! short timer tick drains that channel and turns `ModelEvent`s into proxy
 //! windows, exactly as the Windows pump does.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -25,12 +25,13 @@ use super::dashboard::{Action, Dashboard};
 use super::decode::DecoderWorker;
 use super::gpu::{Gpu, SourceTexture};
 use super::input;
-use super::proxy::Proxy;
+use super::proxy::{Pointer, Proxy};
 use super::resize::Request;
 use crate::connections::Connection;
 use crate::model::{ModelEvent, Window};
 use crate::session::{Session, SessionEvent, VideoEvent};
-use crate::wire::{ClientMessage, InputEvent, MouseButton, Rect, ResizePhase, Size};
+use crate::overlay;
+use crate::wire::{ClientMessage, InputEvent, MenuItem, MouseButton, Rect, ResizePhase, Size};
 
 type ConnectResult = Result<(Connection, Session, Receiver<SessionEvent>), String>;
 
@@ -74,6 +75,12 @@ pub struct App {
     rx: Option<Receiver<SessionEvent>>,
     proxies: HashMap<u64, Proxy>,
     windows: HashMap<u64, Window>,
+    /// Menus, popovers and input-method lists. They are drawn inside the proxy
+    /// they hang off (a Wayland client cannot place a window of its own), so they
+    /// never become gallery cards. Ordered by id: a parent is announced first.
+    transients: BTreeMap<u64, Window>,
+    /// The menu bar of each shared window's app.
+    menu_bars: HashMap<u64, Vec<MenuItem>>,
     window_to_id: HashMap<WindowId, u64>,
     source: Option<SourceTexture>,
     decoder: Option<DecoderWorker>,
@@ -193,6 +200,8 @@ impl App {
             rx: None,
             proxies: HashMap::new(),
             windows: HashMap::new(),
+            transients: BTreeMap::new(),
+            menu_bars: HashMap::new(),
             window_to_id: HashMap::new(),
             source: None,
             decoder: None,
@@ -356,6 +365,8 @@ impl App {
             self.destroy_proxy(id);
         }
         self.windows.clear();
+        self.transients.clear();
+        self.menu_bars.clear();
         self.refresh_gallery();
         self.pending_mouse_moves.clear();
         self.held_keys.clear();
@@ -452,6 +463,17 @@ impl App {
                 self.vds = Some(vds);
                 self.ensure_source(vds);
             }
+            ModelEvent::WindowAdded(w) if w.is_transient() => {
+                self.transients.insert(w.id, w);
+                self.sync_overlays();
+            }
+            ModelEvent::MenuBarChanged { id, items } => {
+                if let Some(proxy) = self.proxies.get_mut(&id) {
+                    proxy.set_menu_bar(items.clone());
+                    self.frame_dirty = true;
+                }
+                self.menu_bars.insert(id, items);
+            }
             ModelEvent::WindowAdded(w) => {
                 if self.cfg.open_all && !self.proxies.contains_key(&w.id) {
                     if let Err(e) = self.create_proxy(el, w.id, w.source, &w.title) {
@@ -459,6 +481,12 @@ impl App {
                     }
                 }
                 self.windows.insert(w.id, w);
+            }
+            ModelEvent::WindowRectChanged { id, source, .. } if self.transients.contains_key(&id) => {
+                if let Some(w) = self.transients.get_mut(&id) {
+                    w.source = source;
+                }
+                self.sync_overlays();
             }
             ModelEvent::WindowRectChanged { id, source, .. } => {
                 if let Some(w) = self.windows.get_mut(&id) {
@@ -475,13 +503,20 @@ impl App {
             ModelEvent::WindowFocused { .. } => {}
             ModelEvent::WindowRemoved { id } => {
                 self.windows.remove(&id);
+                self.menu_bars.remove(&id);
                 self.destroy_proxy(id);
+                if self.transients.remove(&id).is_some() {
+                    self.sync_overlays();
+                }
             }
             ModelEvent::Resynced { removed } => {
                 for id in removed {
                     self.windows.remove(&id);
+                    self.menu_bars.remove(&id);
                     self.destroy_proxy(id);
+                    self.transients.remove(&id);
                 }
+                self.sync_overlays();
             }
             ModelEvent::HostError { code, message } => {
                 self.notice = Some(format!("Host error {code}: {message}"));
@@ -663,8 +698,12 @@ impl App {
         // The window may already be a different size from the one requested (the
         // compositor decides); adopt it so the surface matches it exactly.
         proxy.desired = fitted;
+        if let Some(items) = self.menu_bars.get(&id) {
+            proxy.set_menu_bar(items.clone());
+        }
         self.window_to_id.insert(window_id, id);
         self.proxies.insert(id, proxy);
+        self.sync_overlays();
 
         // If we had to shrink the window to fit the monitor, ask the host to resize
         // the Mac window to the fitted size. The host relayouts natively and reports
@@ -732,9 +771,43 @@ impl App {
 
     fn render_proxy(&mut self, id: u64) {
         let source = self.source.as_ref();
+        // The dashboard's egui context also paints the menu strips (they share one
+        // font atlas in the renderer).
+        let ctx = self.dash_window.ctx.clone();
         if let Some(proxy) = self.proxies.get_mut(&id) {
-            proxy.render(&self.gpu, source);
+            proxy.render(&self.gpu, source, &ctx);
         }
+    }
+
+    /// The shared window a transient window ultimately hangs off.
+    fn root_of(&self, mut id: u64) -> Option<u64> {
+        for _ in 0..8 {
+            match self.transients.get(&id) {
+                Some(t) => id = t.parent?,
+                None => return Some(id),
+            }
+        }
+        None
+    }
+
+    /// Hand every proxy the menus and popovers that belong to it.
+    fn sync_overlays(&mut self) {
+        let mut per_root: HashMap<u64, Vec<overlay::Item>> = HashMap::new();
+        for t in self.transients.values() {
+            let Some(root) = self.root_of(t.id) else {
+                continue;
+            };
+            per_root.entry(root).or_default().push(overlay::Item {
+                id: t.id,
+                parent: t.parent,
+                source: t.source,
+                menu_index: t.menu_index,
+            });
+        }
+        for (id, proxy) in self.proxies.iter_mut() {
+            proxy.set_overlays(per_root.remove(id).unwrap_or_default());
+        }
+        self.frame_dirty = true;
     }
 
     // --- window events -------------------------------------------------------
@@ -796,13 +869,13 @@ impl App {
                 if proxy.tracker.resizing {
                     return;
                 }
-                let content = Size {
-                    w: proxy.source.w,
-                    h: proxy.source.h,
-                };
-                if let Some(event) = proxy.pointer.motion(x, y, content) {
+                let (pointer, redraw) = proxy.pointer_motion(id);
+                if redraw {
+                    self.frame_dirty = true;
+                }
+                if let Pointer::Send(target, event) = pointer {
                     // Coalesce hover motion instead of a TCP write per event.
-                    self.pending_mouse_moves.insert(id, event);
+                    self.pending_mouse_moves.insert(target, event);
                 }
             }
             WindowEvent::MouseInput { state, button, .. } => {
@@ -818,20 +891,21 @@ impl App {
                 if proxy.tracker.resizing {
                     return;
                 }
-                let content = Size {
-                    w: proxy.source.w,
-                    h: proxy.source.h,
+                let pointer = match state {
+                    ElementState::Pressed => proxy.pointer_press(id, button),
+                    ElementState::Released => proxy.pointer_release(id, button),
                 };
-                let (x, y) = proxy.cursor;
-                let event = match state {
-                    ElementState::Pressed => proxy.pointer.press(button, x, y, content),
-                    ElementState::Released => proxy.pointer.release(button, x, y, content),
-                };
-                if let Some(event) = event {
-                    // This event already carries its authoritative coordinates,
-                    // so an older queued hover can be discarded.
-                    self.pending_mouse_moves.remove(&id);
-                    self.send_input(id, event);
+                match pointer {
+                    Pointer::Send(target, event) => {
+                        // This event already carries its authoritative coordinates,
+                        // so an older queued hover can be discarded.
+                        self.pending_mouse_moves.remove(&target);
+                        self.send_input(target, event);
+                    }
+                    // A click on the menu bar opens that menu on the Mac; the menu
+                    // arrives as a transient window and is drawn under the item.
+                    Pointer::Strip(index) => self.send(&ClientMessage::MenuPress { id, index }),
+                    Pointer::Nothing => {}
                 }
             }
             WindowEvent::MouseWheel { delta, .. } => {
@@ -853,14 +927,9 @@ impl App {
                 if dx == 0 && dy == 0 {
                     return;
                 }
-                let content = Size {
-                    w: proxy.source.w,
-                    h: proxy.source.h,
-                };
-                let (x, y) = proxy.cursor;
-                if let Some(event) = proxy.pointer.scroll(x, y, dx, dy, content) {
-                    self.pending_mouse_moves.remove(&id);
-                    self.send_input(id, event);
+                if let Pointer::Send(target, event) = proxy.pointer_scroll(id, dx, dy) {
+                    self.pending_mouse_moves.remove(&target);
+                    self.send_input(target, event);
                 }
             }
             WindowEvent::KeyboardInput {
@@ -921,13 +990,11 @@ impl App {
         let releases = self
             .proxies
             .get_mut(&id)
-            .map(|p| p.pointer.release_all())
+            .map(|p| p.release_all_pointers(id))
             .unwrap_or_default();
-        if !releases.is_empty() {
-            self.pending_mouse_moves.remove(&id);
-        }
-        for event in releases {
-            self.send_input(id, event);
+        for (target, event) in releases {
+            self.pending_mouse_moves.remove(&target);
+            self.send_input(target, event);
         }
     }
 

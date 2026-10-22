@@ -32,6 +32,7 @@ mod gpu;
 mod input;
 mod proxy;
 mod resize;
+mod strip;
 
 use std::process::ExitCode;
 

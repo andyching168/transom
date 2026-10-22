@@ -772,6 +772,50 @@ connections already queued when it stopped and emits one disconnect callback.
 Regression tests exercise shutdown with a receive in progress. This is a code
 finding; real Mac capture and permission behavior require separate validation.
 
+### Transient windows, the menu bar and input-method windows
+
+**Measured on the Mac (macOS 26, 2026-10-23), with `transom-host aux` and a scratch
+AppKit app; not yet exercised through a real client.**
+
+Three things were missing from a client that crops one rect per AX window:
+
+1. **Pop-ups outside the window.** The app-filtered capture does contain an app's
+   own menus and drop-downs, but the client never drew them: it shows only the
+   window's rect, and the host never said a pop-up existed. A Finder menu is a
+   WindowServer window of the app at **layer 101**, `(102,25) 243x631 pt`, and is not
+   in `kAXWindowsAttribute`. They are now found by polling `CGWindowListCopyWindowInfo`
+   (25 Hz) and reported as `menu` / `popover` windows with a `parent` (protocol.md §4).
+2. **The menu bar.** It is a WindowServer window ("Window Server", layer 24, 2048x24
+   here), owned by no app, so the app filter cannot include it, and it shows the menus
+   of the app that is *really* frontmost, which background delivery never changes. The
+   AX route works instead: `AXMenuBar` of a background app is readable (Finder's,
+   with another app frontmost), and `AXPress` on an `AXMenuBarItem` opens the real
+   menu **without changing the frontmost app**. Pressing a *different* item while one
+   is open switches menus; pressing the *open* item again leaves it open, so the host
+   checks `AXSelected` and sends `AXCancel` instead.
+3. **Input methods.** A candidate list is a window of the input-method process
+   (`/Library/Input Methods/…`, `~/Library/Input Methods/…`, or the system's
+   `CursorUIViewService`), so the app filter excluded it. Those processes are found by
+   executable path, added to the capture filter with `updateContentFilter` (verified:
+   the stream keeps delivering native-size frames while the filter changes), and their
+   layer>0 windows are reported like any other pop-up. **Not verified live:** composing
+   with a real input method could not be driven from synthetic events here, so the
+   candidate window itself has not been seen; the classification, the process
+   detection, the capture update and the input routing are tested separately.
+
+**A native menu is picked with the real cursor.** Input addressed to a menu's window
+(the background-delivery technique above) closes the menu but does not run the item;
+with the real cursor over the item it does. Reproduced with a menu opened from the
+menu bar and with an `NSPopUpButton`'s menu. So input for a `menu` window is posted as
+HID input even in background mode, and the cursor is warped back when the last menu
+closes (`InputInjector.returnCursor`, checked: the cursor was where it started).
+
+**Clients without positionable windows.** A Wayland client cannot place a toplevel, so
+the Linux client draws transient windows inside their parent's surface
+(`client/src/overlay.rs`), sliding them back inside if the Mac drew them past an edge
+and cropping (never scaling) one taller than the window. A menu taller than its window
+therefore loses its bottom.
+
 ### Selected apps must be filtered before display capture (0.4.4)
 
 On the real Mac Studio, a Conductor proxy showed wallpaper and the Transom Host

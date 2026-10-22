@@ -136,7 +136,9 @@ reconnecting client gets the full resync again.
 
 ```
 hello          { protocol: u32, vdsSize: Size }         // first message; version + display size
-windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind }
+windowCreated  { id: u64, rect: Rect, title: String, kind: WindowKind,
+                 parent?: u64, menuIndex?: u32 }          // parent/menuIndex: transient windows only
+menuBar        { id: u64, items: [{ index: u32, title: String, enabled: bool }] }
 windowDestroyed{ id: u64 }
 windowMoved    { id: u64, rect: Rect }                  // ACTUAL geometry, see I-4
 windowTitle    { id: u64, title: String }
@@ -154,8 +156,41 @@ Concrete bytes on the wire (one framed control message):
 
 `WindowKind` distinguishes a normal window from transient UI (menu, sheet,
 popover), because the client must not give a menu a resizable frame or an
-Alt+Tab entry. The exact taxonomy depends on what AX subroles actually report
-(OQ-1).
+Alt+Tab entry.
+
+#### Transient windows (`kind` is not `normal`)
+
+Menus, drop-downs, popovers and input-method candidate lists are separate
+WindowServer windows the app (or the input method) places wherever it likes, so a
+crop of the app's window never contains them. The host reports each one as its own
+window, found by polling the WindowServer, not AX (architecture.md §8, "Transient
+windows"):
+
+- `kind` is `menu` for a native `NSMenu` (window layer 101) and `popover` for any
+  other transient window of a shared app, and for an input method's windows.
+- `rect` is its place in the shared texture, VDS pixels, **clipped to the display**;
+  the origin is the clipped origin, so a click's window-local point added to it is
+  where those pixels really are.
+- `parent` is the window to place it against: the window it overlaps most (its own
+  app's first), else the window last focused; for a submenu, the menu that opened it.
+- `menuIndex` is present when the menu was opened by a `menuPress`: the client puts
+  it under that item of its own menu strip instead of where the Mac drew it (the Mac
+  drew it under *its* menu bar, which is not part of any window).
+- Moves and destruction use `windowMoved` / `windowDestroyed`. Transient windows are
+  **never** listed in `tileLayout` and never count toward I-5.
+- Input addressed to a transient window's `id` is routed to that window, with
+  coordinates local to its `rect`. A native menu is tracked by the system against the
+  real cursor, so while one is open the host posts its input as real HID input and
+  returns the cursor afterwards.
+
+#### Menu bar
+
+The Mac menu bar is drawn by the WindowServer and is not in the capture, and in any
+case belongs to whichever app is really frontmost. The host reads each shared app's
+`AXMenuBar` (it is readable while the app is in the background) and sends the
+top-level titles, minus the Apple menu, as `menuBar { id, items }` for each of that
+app's windows: on resync, and whenever they change. `index` is the host's handle.
+The client draws them itself, and sends `menuPress` to open one.
 
 ### Client -> Host
 
@@ -169,6 +204,7 @@ is authoritative here; this line was corrected to match it — AGENTS.md.)
 requestResize  { id: u64, size: Size, phase: ResizePhase }
 requestFocus   { id: u64 }
 requestClose   { id: u64 }
+menuPress      { id: u64, index: u32 }    // open menu `index` of id's app; again to close it
 input          { id: u64, event: InputEvent, ts: u64 }
 ```
 

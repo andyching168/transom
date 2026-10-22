@@ -34,6 +34,8 @@ mod discovery;
 mod hevc;
 mod model;
 mod net;
+#[cfg(any(target_os = "linux", test))]
+mod overlay;
 #[cfg(any(windows, target_os = "linux", test))]
 mod pointer;
 mod runner;

@@ -37,6 +37,8 @@ struct Params {
     target_size: vec2<u32>, // pixels the crop is mapped onto
     source_height: u32,     // luma rows; chroma rows follow
     mode: u32,
+    dest: vec2<u32>,        // where the viewport starts in the surface
+    pad: vec2<u32>,
 };
 @group(0) @binding(0) var<uniform> params: Params;
 @group(0) @binding(1) var src: texture_2d<f32>;
@@ -69,8 +71,8 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
     }
     // Integer pixel mapping: output pixel (px, py) shows source pixel
     // crop.xy + floor(pos * crop.wh / target). Equal sizes make this the identity.
-    let px = u32(i.pos.x);
-    let py = u32(i.pos.y);
+    let px = u32(i.pos.x) - params.dest.x;
+    let py = u32(i.pos.y) - params.dest.y;
     let sx = min(params.crop.x + (px * params.crop.z) / max(params.target_size.x, 1u),
                  params.crop.x + params.crop.z - 1u);
     let sy = min(params.crop.y + (py * params.crop.w) / max(params.target_size.y, 1u),
@@ -87,7 +89,25 @@ fn fs_main(i: VsOut) -> @location(0) vec4<f32> {
 }
 "#;
 
-const PARAMS_SIZE: u64 = 32;
+const PARAMS_SIZE: u64 = 48;
+
+/// One rectangle of a composed frame: `crop` of the source drawn at `dest`,
+/// mapped onto `target` pixels (equal sizes are the 1:1 blit).
+#[derive(Clone, Copy)]
+pub struct Layer {
+    pub crop: [u32; 4],
+    pub target: (u32, u32),
+    pub dest: (u32, u32),
+}
+
+/// The result of asking a surface for its next frame.
+pub enum Acquired {
+    Frame(wgpu::SurfaceTexture),
+    /// Outdated or lost: reconfigure and try again.
+    Reconfigure,
+    /// Not available this tick (timeout, occluded); nothing to do.
+    Skip,
+}
 
 pub struct Gpu {
     pub state: egui_wgpu::RenderState,
@@ -332,6 +352,107 @@ impl Gpu {
         self.queue().submit([encoder.finish()]);
         self.queue().present(frame);
         true
+    }
+
+    pub fn acquire(&self, surface: &wgpu::Surface<'static>) -> Acquired {
+        match surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => {
+                Acquired::Frame(f)
+            }
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                Acquired::Reconfigure
+            }
+            _ => Acquired::Skip,
+        }
+    }
+
+    /// Record the layers of one frame into `encoder`, back to front, in one pass.
+    /// Each layer gets its own parameter buffer: they are all read when the
+    /// command buffer runs, so one shared buffer would show every layer the last
+    /// layer's parameters.
+    pub fn encode_layers(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        surface_size: (u32, u32),
+        clear: [f64; 4],
+        layers: &[Layer],
+        source: &SourceTexture,
+    ) {
+        let mut prepared = Vec::with_capacity(layers.len());
+        for layer in layers {
+            let mut bytes = [0u8; PARAMS_SIZE as usize];
+            for (i, v) in [
+                layer.crop[0],
+                layer.crop[1],
+                layer.crop[2],
+                layer.crop[3],
+                layer.target.0,
+                layer.target.1,
+                source.height,
+                0u32,
+                layer.dest.0,
+                layer.dest.1,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_ne_bytes());
+            }
+            let buffer = self
+                .device()
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("transom layer params"),
+                    contents: &bytes,
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let bind_group = self.device().create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("transom layer bind group"),
+                layout: &self.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&source.view),
+                    },
+                ],
+            });
+            prepared.push((buffer, bind_group, *layer));
+        }
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("transom layers"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: clear[0],
+                        g: clear[1],
+                        b: clear[2],
+                        a: clear[3],
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        for (_buffer, bind_group, layer) in &prepared {
+            let x = layer.dest.0.min(surface_size.0.saturating_sub(1));
+            let y = layer.dest.1.min(surface_size.1.saturating_sub(1));
+            let w = layer.target.0.min(surface_size.0 - x).max(1);
+            let h = layer.target.1.min(surface_size.1 - y).max(1);
+            pass.set_viewport(x as f32, y as f32, w as f32, h as f32, 0.0, 1.0);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
     }
 
     /// Developer aid (`TRANSOM_DUMP_DASHBOARD`): write a rendered surface texture

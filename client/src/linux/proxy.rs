@@ -9,6 +9,7 @@
 //!    pixel-exact blit; during a live drag the source is transiently stretched
 //!    into the new size (the accepted resample, snapped away when the drag ends).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -16,11 +17,23 @@ use egui_wgpu::wgpu;
 use egui_winit::winit::dpi::PhysicalSize;
 use egui_winit::winit::window::Window;
 
-use super::gpu::{Gpu, RenderMode, SourceTexture};
+use super::gpu::{Acquired, Gpu, Layer, RenderMode, SourceTexture};
 use super::input::ScrollAccumulator;
 use super::resize::{Request, ResizeTracker};
+use super::strip::MenuStrip;
+use crate::overlay::{self, Placed};
 use crate::pointer::PointerGate;
-use crate::wire::{Rect, Size};
+use crate::wire::{InputEvent, MouseButton, Rect, Size};
+
+/// What a pointer message on a proxy window turned into.
+#[derive(Debug, PartialEq)]
+pub enum Pointer {
+    /// Send this to window `id` (the proxy itself or a menu/popover on it).
+    Send(u64, InputEvent),
+    /// A press on menu-bar item `index`: open its menu.
+    Strip(u32),
+    Nothing,
+}
 
 /// Right after a window is created some compositors reconfigure it to a size
 /// that differs from the one requested (GNOME sizes the frame inside the first
@@ -49,6 +62,18 @@ pub struct Proxy {
     created: Instant,
     startup_retries: u8,
     needs_configure: bool,
+    /// Menus, popovers and input-method lists hanging off this window, parents
+    /// first (`overlay::layout`).
+    pub overlays: Vec<overlay::Item>,
+    placed: Vec<Placed>,
+    /// The Mac app's menu bar, once the host has sent it.
+    pub strip: Option<MenuStrip>,
+    /// Pointer state for each overlay, as `pointer` is for the window itself.
+    gates: HashMap<u64, PointerGate>,
+    /// The window a held button went down on; it gets the drag and the release.
+    grab: Option<u64>,
+    /// A press was spent on the menu strip; its release is too.
+    strip_press: bool,
 }
 
 impl Proxy {
@@ -82,6 +107,12 @@ impl Proxy {
             created: Instant::now(),
             startup_retries: 0,
             needs_configure: false,
+            overlays: Vec::new(),
+            placed: Vec::new(),
+            strip: None,
+            gates: HashMap::new(),
+            grab: None,
+            strip_press: false,
         })
     }
 
@@ -175,8 +206,8 @@ impl Proxy {
         true
     }
 
-    /// Draw one frame and present.
-    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>) {
+    /// Draw one frame and present. `ctx` paints the menu strip.
+    pub fn render(&mut self, gpu: &Gpu, source_tex: Option<&SourceTexture>, ctx: &egui::Context) {
         let size = self.tracker.size;
         // While waiting for a resize acknowledgement, crop/letterbox at native
         // scale. Only an actual interactive resize may stretch the pixels.
@@ -205,6 +236,16 @@ impl Proxy {
             gpu.configure(&self.surface, size.w, size.h);
             self.needs_configure = false;
         }
+        // Menus and the menu strip are composed over the content. While a resize
+        // gesture stretches the content they are left out: they are placed from the
+        // settled size.
+        let composed = (!self.overlays.is_empty() || self.strip.is_some())
+            && !stretch
+            && !self.checkerboard;
+        if let (true, Some(tex)) = (composed, source_tex) {
+            self.render_composed(gpu, tex, ctx, (draw_w, draw_h), clear);
+            return;
+        }
         let ok = gpu.draw(
             &self.surface,
             (size.w, size.h),
@@ -218,4 +259,266 @@ impl Proxy {
             self.needs_configure = true;
         }
     }
+
+    // --- menus, popovers and the menu strip -----------------------------------
+
+    fn scale(&self) -> f64 {
+        self.window.scale_factor()
+    }
+
+    fn content(&self) -> Size {
+        Size {
+            w: self.source.w,
+            h: self.source.h,
+        }
+    }
+
+    /// Recompute where each overlay is drawn from the current size, source and
+    /// menu strip.
+    fn relayout(&mut self) {
+        let scale = self.scale();
+        let size = self.tracker.size;
+        let strip = &self.strip;
+        self.placed = overlay::layout(
+            (size.w, size.h),
+            self.source,
+            &self.overlays,
+            |index| strip.as_ref().and_then(|s| s.anchor(index, scale)),
+        );
+        let live: Vec<u64> = self.overlays.iter().map(|o| o.id).collect();
+        self.gates.retain(|id, _| live.contains(id));
+        if self.grab.is_some_and(|g| g != 0 && !live.contains(&g)) {
+            self.grab = None;
+        }
+    }
+
+    fn render_composed(
+        &mut self,
+        gpu: &Gpu,
+        tex: &SourceTexture,
+        ctx: &egui::Context,
+        draw: (u32, u32),
+        clear: Option<[f64; 4]>,
+    ) {
+        self.relayout();
+        let size = self.tracker.size;
+        let frame = match gpu.acquire(&self.surface) {
+            Acquired::Frame(f) => f,
+            Acquired::Reconfigure => {
+                self.needs_configure = true;
+                return;
+            }
+            Acquired::Skip => return,
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut layers = vec![Layer {
+            crop: [self.source.x, self.source.y, draw.0, draw.1],
+            target: draw,
+            dest: (0, 0),
+        }];
+        for p in &self.placed {
+            layers.push(Layer {
+                crop: [p.crop.x, p.crop.y, p.w, p.h],
+                target: (p.w, p.h),
+                dest: (p.x, p.y),
+            });
+        }
+        let mut encoder = gpu
+            .device()
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("transom proxy"),
+            });
+        gpu.encode_layers(
+            &mut encoder,
+            &view,
+            (size.w, size.h),
+            clear.unwrap_or([0.0, 0.0, 0.0, 1.0]),
+            &layers,
+            tex,
+        );
+        let scale = self.scale();
+        let mut extra = Vec::new();
+        if let Some(strip) = self.strip.as_mut() {
+            extra = strip.paint(gpu, ctx, &mut encoder, &view, (size.w, size.h), scale);
+        }
+        gpu.queue()
+            .submit(extra.into_iter().chain([encoder.finish()]));
+        gpu.queue().present(frame);
+    }
+
+    /// Replace the transient windows hanging off this window.
+    pub fn set_overlays(&mut self, overlays: Vec<overlay::Item>) {
+        self.overlays = overlays;
+    }
+
+    /// Replace the menu bar. An empty one removes the strip.
+    pub fn set_menu_bar(&mut self, items: Vec<crate::wire::MenuItem>) {
+        if items.is_empty() {
+            self.strip = None;
+        } else if let Some(strip) = self.strip.as_mut() {
+            strip.items = items;
+        } else {
+            self.strip = Some(MenuStrip {
+                items,
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Where a pointer at the last known cursor position lands: the menu strip,
+    /// a menu or popover, or the window itself. A held button keeps the window it
+    /// went down on.
+    fn target(&self) -> Target {
+        if let Some(grab) = self.grab {
+            return Target::Window(grab);
+        }
+        let (x, y) = self.cursor;
+        if let Some(strip) = &self.strip {
+            if let Some(index) = strip.item_at(x, y, self.scale()) {
+                return Target::Strip(index);
+            }
+        }
+        match overlay::hit(&self.placed, x, y) {
+            Some((id, _, _)) => Target::Window(id),
+            None => Target::Window(0),
+        }
+    }
+
+    /// The point in `target`'s own coordinates and its content size. `0` is the
+    /// window itself.
+    fn local(&self, target: u64) -> Option<((i32, i32), Size)> {
+        let (x, y) = self.cursor;
+        if target == 0 {
+            return Some(((x, y), self.content()));
+        }
+        let p = self.placed.iter().find(|p| p.id == target)?;
+        Some((
+            (x - p.x as i32, y - p.y as i32),
+            Size { w: p.w, h: p.h },
+        ))
+    }
+
+    /// Hover or drag. `own` is this proxy's window id.
+    pub fn pointer_motion(&mut self, own: u64) -> (Pointer, bool) {
+        let before = self.strip.as_ref().and_then(|s| s.hover);
+        let target = self.target();
+        let hover = match target {
+            Target::Strip(i) => Some(i),
+            _ => None,
+        };
+        if let Some(strip) = self.strip.as_mut() {
+            strip.hover = hover;
+        }
+        let redraw = before != hover;
+        let Target::Window(t) = target else {
+            return (Pointer::Nothing, redraw);
+        };
+        let Some(((x, y), content)) = self.local(t) else {
+            return (Pointer::Nothing, redraw);
+        };
+        let event = if t == 0 {
+            self.pointer.motion(x, y, content)
+        } else {
+            self.gates.entry(t).or_default().motion(x, y, content)
+        };
+        let id = if t == 0 { own } else { t };
+        (
+            event.map_or(Pointer::Nothing, |e| Pointer::Send(id, e)),
+            redraw,
+        )
+    }
+
+    pub fn pointer_press(&mut self, own: u64, button: MouseButton) -> Pointer {
+        let t = match self.target() {
+            Target::Strip(index) => {
+                self.strip_press = true;
+                return Pointer::Strip(index);
+            }
+            Target::Window(t) => t,
+        };
+        let Some(((x, y), content)) = self.local(t) else {
+            return Pointer::Nothing;
+        };
+        let event = if t == 0 {
+            self.pointer.press(button, x, y, content)
+        } else {
+            self.gates.entry(t).or_default().press(button, x, y, content)
+        };
+        match event {
+            Some(e) => {
+                self.grab = Some(t);
+                Pointer::Send(if t == 0 { own } else { t }, e)
+            }
+            None => Pointer::Nothing,
+        }
+    }
+
+    pub fn pointer_release(&mut self, own: u64, button: MouseButton) -> Pointer {
+        if std::mem::take(&mut self.strip_press) {
+            return Pointer::Nothing;
+        }
+        let t = match self.target() {
+            Target::Window(t) => t,
+            Target::Strip(_) => return Pointer::Nothing,
+        };
+        let Some(((x, y), content)) = self.local(t) else {
+            return Pointer::Nothing;
+        };
+        let event = if t == 0 {
+            self.pointer.release(button, x, y, content)
+        } else {
+            self.gates.entry(t).or_default().release(button, x, y, content)
+        };
+        match event {
+            Some(e) => {
+                self.grab = None;
+                Pointer::Send(if t == 0 { own } else { t }, e)
+            }
+            None => Pointer::Nothing,
+        }
+    }
+
+    pub fn pointer_scroll(&mut self, own: u64, dx: i32, dy: i32) -> Pointer {
+        let Target::Window(t) = self.target() else {
+            return Pointer::Nothing;
+        };
+        let Some(((x, y), content)) = self.local(t) else {
+            return Pointer::Nothing;
+        };
+        let event = if t == 0 {
+            self.pointer.scroll(x, y, dx, dy, content)
+        } else {
+            self.gates.entry(t).or_default().scroll(x, y, dx, dy, content)
+        };
+        event.map_or(Pointer::Nothing, |e| {
+            Pointer::Send(if t == 0 { own } else { t }, e)
+        })
+    }
+
+    /// The pointer was taken away: release every button the host thinks is down,
+    /// on the window and on every menu.
+    pub fn release_all_pointers(&mut self, own: u64) -> Vec<(u64, InputEvent)> {
+        self.grab = None;
+        self.strip_press = false;
+        let mut out: Vec<(u64, InputEvent)> = self
+            .pointer
+            .release_all()
+            .into_iter()
+            .map(|e| (own, e))
+            .collect();
+        for (id, gate) in self.gates.iter_mut() {
+            out.extend(gate.release_all().into_iter().map(|e| (*id, e)));
+        }
+        out
+    }
+}
+
+/// Where a pointer position lands.
+#[derive(Clone, Copy)]
+enum Target {
+    /// A window: `0` is the proxy's own, anything else a menu or popover.
+    Window(u64),
+    Strip(u32),
 }

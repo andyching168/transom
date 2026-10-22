@@ -816,6 +816,18 @@ the Linux client draws transient windows inside their parent's surface
 and cropping (never scaling) one taller than the window. A menu taller than its window
 therefore loses its bottom.
 
+### An application *inclusion* filter drops menus (measured 2026-10-23)
+
+With `SCContentFilter(display:including:applications…)` — and equally with
+`including:` the app's `SCWindow`s — an open `NSMenu` (layer 101, owned by the shared
+app, listed by `SCShareableContent`) is **absent from the frames**; the client then
+cropped the Word window's own pixels where the menu should be. Measured on a MacBook
+Air (2048x1280 @1x) with `transom-host aux "Microsoft Word" --press 2 --dump`: only
+`SCContentFilter(display:excludingApplications:exceptingWindows:)` over every *other*
+application produced a frame containing the menu. `DisplayCapture` therefore excludes
+all other apps, and rechecks the running-app list once a second because an app started
+later is not in the exclusion list.
+
 ### Selected apps must be filtered before display capture (0.4.4)
 
 On the real Mac Studio, a Conductor proxy showed wallpaper and the Transom Host

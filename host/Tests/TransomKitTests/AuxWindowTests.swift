@@ -320,16 +320,17 @@ struct MenuBarTests {
         }
     }
 
-    @Test("a press is remembered for its app only briefly")
-    func pressWindow() {
+    @Test("a press that did not open a menu is forgotten, so it cannot anchor a later popup")
+    func failedPressForgotten() {
         let registry = WindowRegistry()
         let id = registry.nextSharedIDForTesting(pid: 4_000_000, rect: WireRect(x: 0, y: 0, w: 10, h: 10))
         let service = MenuBarService(registry: registry, emit: { _ in })
+        // The pid does not exist, so AX fails.
+        guard case .failed = service.press(id: id, index: 2) else {
+            Issue.record("expected failure")
+            return
+        }
         #expect(service.recentPress(pid: 4_000_000) == nil)
-        // The pid does not exist, so the AX press fails, but the intent is recorded
-        // first: the menu may open a moment later even if AX reports an error.
-        _ = service.press(id: id, index: 2)
-        #expect(service.recentPress(pid: 4_000_000) == .init(windowID: id, index: 2))
     }
 }
 

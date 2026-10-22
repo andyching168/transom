@@ -41,6 +41,8 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     private var stream: SCStream?
     private var extraPIDs: Set<pid_t> = []
     private var filterUpdateRunning = false
+    private var excludedPIDs: Set<pid_t> = []
+    private var exclusionTask: Task<Void, Never>?
     private var latestPixelBuffer: CVPixelBuffer?
     private var _stats: FrameStats?
     private let ciContext = CIContext(options: [.cacheIntermediates: false])
@@ -87,12 +89,11 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
 
         let filter: SCContentFilter
         if let applicationPIDs {
-            // Inclusion, not exclusion: other apps, the desktop and this host's
-            // own panel must never appear inside a selected window's crop.
             let wanted = applicationPIDs.union(lock.withLock { extraPIDs })
-            let applications = content.applications.filter { wanted.contains($0.processID) }
-            guard !applications.isEmpty else { throw CaptureError.noSelectedApplications }
-            filter = SCContentFilter(display: scDisplay, including: applications, exceptingWindows: [])
+            guard let built = Self.appFilter(content: content, display: scDisplay, wanted: wanted)
+            else { throw CaptureError.noSelectedApplications }
+            filter = built.filter
+            lock.withLock { excludedPIDs = built.excluded }
         } else {
             // Whole-display capture is reserved for the diagnostic CLI/probe.
             filter = SCContentFilter(display: scDisplay, excludingWindows: [])
@@ -121,6 +122,61 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         try await stream.startCapture()
         lock.withLock { self.stream = stream }
+        if applicationPIDs != nil { startExclusionRefresh() }
+    }
+
+    /// A filter that shows the wanted apps and nothing of any other app.
+    ///
+    /// It *excludes* every other application rather than *including* the wanted
+    /// ones: an inclusion filter silently drops an app's own menu windows (layer
+    /// 101), which a selected window needs (measured on the Mac with
+    /// `transom-host aux --dump`: inclusion by application or by window omits an
+    /// open menu, exclusion keeps it).
+    static func appFilter(
+        content: SCShareableContent, display: SCDisplay, wanted: Set<pid_t>
+    ) -> (filter: SCContentFilter, excluded: Set<pid_t>)? {
+        guard content.applications.contains(where: { wanted.contains($0.processID) }) else {
+            return nil
+        }
+        let others = content.applications.filter { !wanted.contains($0.processID) }
+        return (
+            SCContentFilter(display: display, excludingApplications: others, exceptingWindows: []),
+            Set(others.map(\.processID))
+        )
+    }
+
+    /// An app started after the stream did is not in its exclusion list and would
+    /// show up on the display. Re-read the running apps and update the filter when
+    /// the set changed.
+    private func startExclusionRefresh() {
+        let task = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(1))
+                guard let self, !Task.isCancelled else { return }
+                await self.refreshExclusions()
+            }
+        }
+        lock.withLock { exclusionTask = task }
+    }
+
+    private func refreshExclusions() async {
+        guard let base = applicationPIDs else { return }
+        guard let content = try? await SCShareableContent.excludingDesktopWindows(
+                false, onScreenWindowsOnly: false),
+            let scDisplay = content.displays.first(where: { $0.displayID == display.id })
+        else { return }
+        let (extra, stream, applied) = lock.withLock { (extraPIDs, self.stream, excludedPIDs) }
+        guard let stream,
+            let built = Self.appFilter(content: content, display: scDisplay, wanted: base.union(extra)),
+            built.excluded != applied
+        else { return }
+        do {
+            try await stream.updateContentFilter(built.filter)
+            lock.withLock { excludedPIDs = built.excluded }
+        } catch {
+            Log.capture.error(
+                "capture: updateContentFilter failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// Also capture the windows of these processes (input methods, whose
@@ -145,16 +201,14 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
                     false, onScreenWindowsOnly: false),
                 let scDisplay = content.displays.first(where: { $0.displayID == display.id })
             {
-                let wanted = base.union(target)
-                let applications = content.applications.filter { wanted.contains($0.processID) }
-                if !applications.isEmpty {
-                    let filter = SCContentFilter(
-                        display: scDisplay, including: applications, exceptingWindows: [])
+                if let built = Self.appFilter(
+                    content: content, display: scDisplay, wanted: base.union(target))
+                {
                     do {
-                        try await stream.updateContentFilter(filter)
+                        try await stream.updateContentFilter(built.filter)
+                        lock.withLock { excludedPIDs = built.excluded }
                         Log.capture.notice(
-                            "capture: filter now includes \(applications.count, privacy: .public) apps (\(target.count, privacy: .public) input method)"
-                        )
+                            "capture: filter updated (\(target.count, privacy: .public) input method)")
                     } catch {
                         Log.capture.error(
                             "capture: updateContentFilter failed: \(error.localizedDescription, privacy: .public)"
@@ -171,6 +225,7 @@ public final class DisplayCapture: NSObject, SCStreamOutput, @unchecked Sendable
     }
 
     public func stop() async {
+        lock.withLock { exclusionTask?.cancel(); exclusionTask = nil }
         let s: SCStream? = lock.withLock {
             let current = stream
             stream = nil

@@ -1,5 +1,10 @@
 import ArgumentParser
 import CoreGraphics
+import ScreenCaptureKit
+import CoreImage
+import CoreVideo
+import ImageIO
+import UniformTypeIdentifiers
 import Foundation
 import TransomKit
 
@@ -27,6 +32,11 @@ struct Aux: AsyncParsableCommand {
 
     @Option(name: .long, help: "Press menu-bar item N a moment after starting, cancel it at the end.")
     var press: Int?
+
+    @Option(
+        name: .long,
+        help: "With --press: save the capture's frame (PNG) taken while the menu is open to this path.")
+    var dump: String?
 
     @Flag(
         name: .long,
@@ -57,6 +67,15 @@ struct Aux: AsyncParsableCommand {
 
         if captureCheck { try await Self.checkCapture(target: target, display: info, inputMethods: ims) }
 
+        let latest = LatestFrame()
+        var dumpCapture: DisplayCapture?
+        if dump != nil {
+            let c = DisplayCapture(display: info, fps: 30, applicationPIDs: [target.pid])
+            c.onPixelBuffer = { buffer, _ in latest.set(buffer) }
+            try await c.start()
+            dumpCapture = c
+        }
+        var dumped = false
         var seen: [CGWindowID: AuxCandidate] = [:]
         let start = Date()
         var pressed = false
@@ -78,6 +97,17 @@ struct Aux: AsyncParsableCommand {
                     candidate.layer, candidate.kind.rawValue,
                     candidate.isInputMethod ? " (input method)" : "", r.x, r.y, r.w, r.h))
             }
+            if let dump, !dumped, pressed, Date().timeIntervalSince(start) > 3,
+                seen.values.contains(where: { $0.kind == .menu })
+            {
+                dumped = true
+                dumpCapture?.requestRefresh()
+                try await Task.sleep(nanoseconds: 300_000_000)
+                print(latest.save(to: dump))
+                try await Self.filterExperiment(
+                    pid: target.pid, display: info, menuIDs: seen.values.filter { $0.kind == .menu }.map(\.windowID),
+                    path: dump)
+            }
             for gone in seen.keys where !found.contains(where: { $0.windowID == gone }) {
                 print(String(format: "%6.2fs gone     window %u", Date().timeIntervalSince(start), gone))
                 seen[gone] = nil
@@ -87,6 +117,41 @@ struct Aux: AsyncParsableCommand {
                 print("press [\(press)] again -> \(MenuBar.press(pid: target.pid, index: press))")
             }
             try await Task.sleep(nanoseconds: 40_000_000)
+        }
+        await dumpCapture?.stop()
+    }
+
+    /// Which SCK filter shapes capture a menu? Prints what SCShareableContent knows
+    /// and writes one PNG per variant next to `path`.
+    private static func filterExperiment(
+        pid: pid_t, display: DisplayInfo, menuIDs: [CGWindowID], path: String
+    ) async throws {
+        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+        guard let scDisplay = content.displays.first(where: { $0.displayID == display.id }) else { return }
+        let mine = content.windows.filter { $0.owningApplication?.processID == pid }
+        print("experiment: SCK lists \(mine.count) Word windows; layers \(mine.map(\.windowLayer).sorted())")
+        let menus = content.windows.filter { menuIDs.contains($0.windowID) }
+        print("experiment: menu window in SCK list: \(!menus.isEmpty)")
+        let apps = content.applications.filter { $0.processID == pid }
+        let others = content.applications.filter { $0.processID != pid }
+        let variants: [(String, SCContentFilter)] = [
+            ("windows", SCContentFilter(display: scDisplay, including: mine)),
+            ("excluding", SCContentFilter(display: scDisplay, excludingApplications: others, exceptingWindows: [])),
+            ("apps+menu", SCContentFilter(display: scDisplay, including: apps, exceptingWindows: [])),
+        ]
+        for (name, filter) in variants {
+            let latest = LatestFrame()
+            let config = SCStreamConfiguration()
+            config.width = display.pixelWidth
+            config.height = display.pixelHeight
+            config.pixelFormat = kCVPixelFormatType_32BGRA
+            let stream = SCStream(filter: filter, configuration: config, delegate: nil)
+            let sink = FrameSink(latest)
+            try stream.addStreamOutput(sink, type: .screen, sampleHandlerQueue: DispatchQueue(label: "exp"))
+            try await stream.startCapture()
+            try await Task.sleep(for: .seconds(1))
+            try await stream.stopCapture()
+            print("experiment[\(name)]: " + latest.save(to: path.replacingOccurrences(of: ".png", with: "-\(name).png")))
         }
     }
 
@@ -119,5 +184,32 @@ struct Aux: AsyncParsableCommand {
         try await Task.sleep(for: .milliseconds(500))
         print("capture: \(counter.value) frames after removing them again")
         await capture.stop()
+    }
+}
+
+/// The newest frame the capture delivered, for `--dump`.
+private final class LatestFrame: @unchecked Sendable {
+    private let lock = NSLock()
+    private var buffer: CVPixelBuffer?
+    func set(_ b: CVPixelBuffer) { lock.withLock { buffer = b } }
+    func save(to path: String) -> String {
+        guard let b = lock.withLock({ buffer }) else { return "dump: no frame received" }
+        let image = CIImage(cvPixelBuffer: b)
+        guard let cg = CIContext().createCGImage(image, from: image.extent),
+            let dest = CGImageDestinationCreateWithURL(
+                URL(fileURLWithPath: path) as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { return "dump: could not encode" }
+        CGImageDestinationAddImage(dest, cg, nil)
+        return CGImageDestinationFinalize(dest)
+            ? "dump: wrote \(path) (\(cg.width)x\(cg.height))" : "dump: write failed"
+    }
+}
+
+private final class FrameSink: NSObject, SCStreamOutput, @unchecked Sendable {
+    let latest: LatestFrame
+    init(_ l: LatestFrame) { latest = l }
+    func stream(_ s: SCStream, didOutputSampleBuffer b: CMSampleBuffer, of t: SCStreamOutputType) {
+        guard t == .screen, let px = CMSampleBufferGetImageBuffer(b) else { return }
+        latest.set(px)
     }
 }
